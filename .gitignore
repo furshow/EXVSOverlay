@@ -1,0 +1,33 @@
+# Build output (DLL, test host, screenshots made by the test host)
+build/
+*.exe
+*.dll
+*.pdb
+*.lib
+*.obj
+*.o
+*.bmp
+
+# Runtime files the DLL writes next to the game
+EXVSOverlay.ini
+*.log
+imgui.ini
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+*.env
+.env*
+*.pem
+*.key
+*.pfx
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
