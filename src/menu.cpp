@@ -9,6 +9,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"   // MovingWindow, to know when a widget is being dragged
 #include "menu.h"
+#include "framedata.h"
 
 static const int ARCADE_COUNT = 2;   // Card, Coin
 static XINPUT_GAMEPAD_ test_pad; static bool test_pad_set;   // EXVSOVERLAY_TEST_PAD="buttons,lx,ly,rx,ry,lt,rt"
@@ -23,6 +24,7 @@ struct Config {
     int hud_vk = VK_F9;            // toggles the battle HUD
     bool pad_toggle = true;        // Back + Start on a controller
     bool block_input = true;       // game ignores keyboard/mouse/controller while the menu is open
+    bool ignore_unfocused = true;  // ... and while another window has the focus (browser, Discord, ...)
     bool keep_window = true;       // keep the window size saved in SnowLauncher.ini
     int arcade_button[ARCADE_COUNT] = {};   // Card, Coin: XInput button bit (LT 0x10000, RT 0x20000); 0 = off
     bool card_hide = true;         // the game doesn't see those buttons
@@ -41,6 +43,13 @@ struct Config {
     float opacity = 0.94f;
     int up_mode = 0;               // 0 off, 1 AMD FSR 1 (read at startup: the swapchain is taken over then)
     float up_sharp = 0.8f;         // RCAS strength 0..1
+    bool auto_update = true;       // check the GitHub releases when the game starts
+    bool fd_meter = false;         // Training: frame meter
+    bool fd_bones = false;         // Training: live skeleton dots
+    bool fd_hurt = false;          // Training: hurtboxes
+    bool fd_hit = false;           // Training: hitboxes
+    float fdm_x = -1, fdm_y = -1;  // frame meter position (fraction of the screen), -1 = bottom centre
+    float menu_x = -1, menu_y = -1; // menu window position (fraction of the screen), -1 = centre
 };
 static Config cfg;
 static char ini_path[MAX_PATH];
@@ -65,6 +74,7 @@ static void save_config(void) {
     ini_set("hide_hud_key", "%.0f", cfg.hud_vk);
     ini_set("pad_toggle", "%.0f", cfg.pad_toggle);
     ini_set("block_input", "%.0f", cfg.block_input);
+    ini_set("ignore_unfocused", "%.0f", cfg.ignore_unfocused);
     ini_set("keep_window", "%.0f", cfg.keep_window);
     ini_set("card_button", "%.0f", cfg.arcade_button[0]);
     ini_set("coin_button", "%.0f", cfg.arcade_button[1]);
@@ -86,6 +96,15 @@ static void save_config(void) {
     ini_set("opacity", "%.2f", cfg.opacity);
     ini_set("upscaler", "%.0f", cfg.up_mode);
     ini_set("sharpness", "%.2f", cfg.up_sharp);
+    ini_set("auto_update", "%.0f", cfg.auto_update);
+    ini_set("frame_meter", "%.0f", cfg.fd_meter);
+    ini_set("skeleton_view", "%.0f", cfg.fd_bones);
+    ini_set("hurtboxes", "%.0f", cfg.fd_hurt);
+    ini_set("hitboxes", "%.0f", cfg.fd_hit);
+    ini_set("frame_meter_x", "%.4f", cfg.fdm_x);
+    ini_set("frame_meter_y", "%.4f", cfg.fdm_y);
+    ini_set("menu_x", "%.4f", cfg.menu_x);
+    ini_set("menu_y", "%.4f", cfg.menu_y);
 }
 
 void menu_load_config(void) {
@@ -98,6 +117,7 @@ void menu_load_config(void) {
     if (cfg.hud_vk <= 0 || cfg.hud_vk > 0xFE) cfg.hud_vk = VK_F9;
     ini_get_bool("pad_toggle", &cfg.pad_toggle);
     ini_get_bool("block_input", &cfg.block_input);
+    ini_get_bool("ignore_unfocused", &cfg.ignore_unfocused);
     ini_get_bool("keep_window", &cfg.keep_window);
     ini_get_int("card_button", &cfg.arcade_button[0]);
     ini_get_int("coin_button", &cfg.arcade_button[1]);
@@ -136,6 +156,15 @@ void menu_load_config(void) {
     ini_get_float("opacity", &cfg.opacity);
     ini_get_int("upscaler", &cfg.up_mode);
     ini_get_float("sharpness", &cfg.up_sharp);
+    ini_get_bool("auto_update", &cfg.auto_update);
+    ini_get_bool("frame_meter", &cfg.fd_meter);
+    ini_get_bool("skeleton_view", &cfg.fd_bones);
+    ini_get_bool("hurtboxes", &cfg.fd_hurt);
+    ini_get_bool("hitboxes", &cfg.fd_hit);
+    ini_get_float("frame_meter_x", &cfg.fdm_x); ini_get_float("frame_meter_y", &cfg.fdm_y);
+    if (cfg.fdm_x < 0 || cfg.fdm_x > 1 || cfg.fdm_y < 0 || cfg.fdm_y > 1) cfg.fdm_x = cfg.fdm_y = -1;
+    ini_get_float("menu_x", &cfg.menu_x); ini_get_float("menu_y", &cfg.menu_y);
+    if (cfg.menu_x < 0 || cfg.menu_x > 1 || cfg.menu_y < 0 || cfg.menu_y > 1) cfg.menu_x = cfg.menu_y = -1;
     cfg.up_mode = cfg.up_mode == 1 ? 1 : 0;
     if (!(cfg.up_sharp >= 0.0f && cfg.up_sharp <= 1.0f)) cfg.up_sharp = 0.8f;
     if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_UPSCALE", NULL, 0)) cfg.up_mode = 1;   // test host
@@ -150,6 +179,7 @@ void menu_load_config(void) {
 }
 
 int menu_upscale_mode(void) { return cfg.up_mode; }
+bool menu_auto_update(void) { return cfg.auto_update; }
 float menu_upscale_sharpness(void) { return cfg.up_sharp; }
 
 bool menu_enabled(void) { return cfg.enabled; }
@@ -177,7 +207,7 @@ static bool card_capture_armed;
 static DWORD card_pad_resume;   // tick count until which the menu ignores the controller
 
 bool menu_is_open(void) { return menu_open; }
-bool menu_should_draw(void) { return menu_open || cfg.show_fps || cfg.show_pad; }
+bool menu_should_draw(void) { return menu_open || cfg.show_fps || cfg.show_pad || ((cfg.fd_meter || cfg.fd_bones || cfg.fd_hurt || cfg.fd_hit) && fd_active()); }
 bool menu_blocks_input(void) { return menu_open && cfg.block_input; }
 void menu_set_gpu_name(const char *n) { strncpy(gpu_name, n, sizeof(gpu_name) - 1); }
 
@@ -194,6 +224,17 @@ static bool game_has_focus(void) {
     HWND fg = GetForegroundWindow(); DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
     return pid == GetCurrentProcessId();
+}
+
+// What the game may read right now (the loader's keyboard / HID reads and our XInput export ask this,
+// many times per frame, from any thread: the focus is looked up at most every 15 ms).
+bool menu_game_input_blocked(void) {
+    if (menu_open && cfg.block_input) return true;
+    if (!cfg.ignore_unfocused) return false;
+    static volatile ULONGLONG checked_at; static volatile bool focused = true;
+    ULONGLONG now = GetTickCount64();
+    if (now - checked_at >= 15) { focused = game_has_focus(); checked_at = now; }
+    return !focused;
 }
 
 static void poll_pads(void) {
@@ -235,6 +276,7 @@ static void start_rebind(int *target) {
 }
 
 void menu_tick_frame(void) {
+    fd_update(cfg.fd_meter || cfg.fd_bones || cfg.fd_hurt || cfg.fd_hit);   // Training tools: read the game (no-op when both are off)
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     if (!qpf.QuadPart) QueryPerformanceFrequency(&qpf);
     if (last_present.QuadPart) {
@@ -365,7 +407,7 @@ static void card_tick(bool focus) {
 }
 
 void menu_filter_gamepad(XINPUT_GAMEPAD_ *g) {
-    if (menu_open && cfg.block_input) { memset(g, 0, sizeof(*g)); return; }   // the menu is using it
+    if (menu_game_input_blocked()) { memset(g, 0, sizeof(*g)); return; }   // menu open / game not focused
     if (!cfg.card_hide) return;
     for (int s = 0; s < ARCADE_COUNT; s++) {
         int btn = cfg.arcade_button[s];
@@ -497,11 +539,14 @@ static void frame_stats(float *avg_ms, float *worst_ms) {
 struct Movable { float *fx, *fy; int *corner; bool dragging; };
 static Movable mv_fps = { &cfg.fps_x, &cfg.fps_y, &cfg.fps_corner, false };
 static Movable mv_pad = { &cfg.pad_x, &cfg.pad_y, &cfg.pad_corner, false };
+static int fdm_corner = 4;   // 4 = bottom centre (only used when not dragged)
+static Movable mv_meter = { &cfg.fdm_x, &cfg.fdm_y, &fdm_corner, false };
 
 static void movable_place(Movable &m, float margin, UINT w, UINT h) {
     if (m.dragging) return;   // ImGui is moving it this frame
     if (*m.fx >= 0) { ImGui::SetNextWindowPos(ImVec2(*m.fx * w, *m.fy * h), ImGuiCond_Always, ImVec2(0, 0)); return; }
     int c = *m.corner;
+    if (c == 4) { ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h - margin), ImGuiCond_Always, ImVec2(0.5f, 1.0f)); return; }
     ImGui::SetNextWindowPos(ImVec2((c & 1) ? w - margin : margin, (c & 2) ? h - margin : margin), ImGuiCond_Always,
                             ImVec2((c & 1) ? 1.0f : 0.0f, (c & 2) ? 1.0f : 0.0f));
 }
@@ -541,6 +586,113 @@ static void movable_combo(const char *label, Movable &m) {
 // ---------------------------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------
+// Training tools: frame meter (two rows of the last frames + numbers) and live skeleton dots
+// ---------------------------------------------------------------------------------------------
+static ImU32 fd_color(int c) {
+    switch (c) {
+        case FD_FREE: return IM_COL32(70, 74, 86, 230);
+        case FD_STARTUP: return IM_COL32(64, 200, 96, 255);
+        case FD_ACTIVE: return IM_COL32(236, 64, 64, 255);
+        case FD_RECOVERY: return IM_COL32(64, 128, 236, 255);
+        case FD_HITSTUN: return IM_COL32(240, 200, 48, 255);
+        case FD_DOWN: return IM_COL32(176, 88, 208, 255);
+        case FD_GUARD: return IM_COL32(64, 204, 224, 255);
+    }
+    return IM_COL32(0, 0, 0, 0);
+}
+
+static void fd_summary_text(char *out, size_t n, const FdSummary *s) {
+    if (!s || !s->valid) { snprintf(out, n, "-"); return; }
+    char adv[32] = "";
+    if (s->adv_known) snprintf(adv, sizeof(adv), "   On hit %+d", s->adv);
+    else if (s->hit && s->chained) snprintf(adv, sizeof(adv), "   (combo)");
+    if (s->hit) snprintf(out, n, "Startup %df   Total %df%s", s->startup, s->total, adv);
+    else snprintf(out, n, "Whiff   Total %df", s->total);
+}
+
+static void draw_frame_meter(UINT w, UINT h) {
+    const float k = (float)h / 1080.0f;
+    const int N = 90;
+    const float cw = floorf(9.0f * k), ch = floorf(16.0f * k), gap = 1.0f;
+    const float line = ImGui::GetFontSize(), pad = 10 * k;
+    const float total_w = N * cw, win_w = total_w + 2 * pad, win_h = 2 * (ch + line + 8 * k) + 2 * pad;
+    movable_place(mv_meter, 110.0f * k, w, h);
+    ImGui::SetNextWindowSize(ImVec2(win_w, win_h), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.66f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6 * k);
+    bool shown = ImGui::Begin("##framemeter", NULL, movable_flags(0));
+    ImGui::PopStyleVar(2);
+    if (!shown) { ImGui::End(); return; }
+    movable_update(mv_meter, w, h);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 o = ImGui::GetWindowPos();
+    const float x0 = o.x + pad, y0 = o.y + pad + line + 2 * k;
+    for (int row = 0; row < 2; row++) {
+        int u = row ? fd_target() : fd_player();
+        float y = y0 + row * (ch + line + 8 * k);
+        char txt[160]; fd_summary_text(txt, sizeof(txt), fd_summary(row));
+        char label[200]; snprintf(label, sizeof(label), "%s %s   %s", row ? "TARGET" : "YOU", u >= 0 ? fd_unit_name(u) : "?", txt);
+        dl->AddText(ImVec2(x0, y - line - 2 * k), IM_COL32(230, 236, 248, 255), label);
+        for (int i = 0; i < N; i++) {
+            int c = u >= 0 ? fd_cell(u, N - 1 - i) : FD_NONE;
+            float x = x0 + i * cw;
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(x + cw - gap, y + ch), c == FD_NONE ? IM_COL32(40, 42, 50, 200) : fd_color(c));
+        }
+    }
+    ImGui::End();
+}
+
+static void draw_skeleton(UINT w, UINT h) {
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const float r = 3.0f * (float)h / 1080.0f;
+    static float b[128][3];
+    for (int i = 0; i < fd_unit_count(); i++) {
+        ImU32 col = i == fd_player() ? IM_COL32(80, 230, 120, 230) : i == fd_target() ? IM_COL32(240, 90, 90, 230) : IM_COL32(230, 230, 230, 200);
+        int n = fd_bones(i, b, 128);
+        for (int j = 0; j < n; j++) {
+            float x, y;
+            if (!fd_project(b[j], &x, &y) || x < -1.2f || x > 1.2f || y < -1.2f || y > 1.2f) continue;
+            dl->AddCircleFilled(ImVec2((x + 1) * 0.5f * w, (1 - y) * 0.5f * h), r, col, 8);
+        }
+    }
+}
+
+static void draw_spheres(UINT w, UINT h, int (*get)(int, float (*)[4], int), ImU32 fill, ImU32 line) {
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const float th = 2.0f * (float)h / 1080.0f;
+    static float s[256][4];
+    for (int i = 0; i < fd_unit_count(); i++) {
+        int n = get(i, s, 256);
+        for (int j = 0; j < n; j++) {
+            float x, y, r;
+            if (!fd_project_sphere(s[j], s[j][3], &x, &y, &r) || x < -1.3f || x > 1.3f || y < -1.3f || y > 1.3f) continue;
+            ImVec2 c((x + 1) * 0.5f * w, (1 - y) * 0.5f * h); float rp = r * 0.5f * h;
+            if (rp < 2 || rp > h) continue;
+            dl->AddCircleFilled(c, rp, fill, 32);
+            dl->AddCircle(c, rp, line, 32, th);
+        }
+    }
+}
+
+static void draw_hurtboxes(UINT w, UINT h) {
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const float th = 2.0f * (float)h / 1080.0f;
+    static float s[256][4];
+    for (int i = 0; i < fd_unit_count(); i++) {
+        int n = fd_hurt(i, s, 64);
+        for (int j = 0; j < n; j++) {
+            float x, y, r;
+            if (!fd_project_sphere(s[j], s[j][3], &x, &y, &r) || x < -1.3f || x > 1.3f || y < -1.3f || y > 1.3f) continue;
+            ImVec2 c((x + 1) * 0.5f * w, (1 - y) * 0.5f * h); float rp = r * 0.5f * h;
+            if (rp < 2 || rp > h) continue;
+            dl->AddCircleFilled(c, rp, IM_COL32(60, 220, 110, 40), 32);
+            dl->AddCircle(c, rp, IM_COL32(60, 230, 120, 220), 32, th);
+        }
+    }
+}
+
 static void draw_fps_counter(UINT w, UINT h) {
     movable_place(mv_fps, 12.0f * (float)h / 1080.0f, w, h);
     ImGui::SetNextWindowBgAlpha(0.55f);
@@ -757,12 +909,15 @@ static void tab_info(UINT w, UINT h) {
 // ---------------------------------------------------------------------------------------------
 struct ResOption { const char *ini; const char *label; int launcher_index; UINT height; };
 static const ResOption RES_OPTIONS[] = {
+    { "144p",  "144p  (256 x 144)",    6, 144 },     // every resolution SnowLauncher offers
+    { "240p",  "240p  (426 x 240)",    5, 240 },
+    { "480p",  "480p  (854 x 480)",    4, 480 },
     { "720p",  "720p  (1280 x 720)",   3, 720 },
     { "1080p", "1080p (1920 x 1080)",  2, 1080 },
     { "2k",    "2K    (2560 x 1440)",  1, 1440 },
     { "4K",    "4K    (3840 x 2160)",  0, 2160 },
 };
-static const int RES_COUNT = 4;
+static const int RES_COUNT = sizeof(RES_OPTIONS) / sizeof(RES_OPTIONS[0]);
 static int res_saved = -1;         // value in the ini when the menu was opened (-1 unknown)
 static int res_selected = -1;
 static char res_cfg_path[MAX_PATH], res_launcher_path[MAX_PATH];
@@ -809,13 +964,31 @@ static bool res_apply(int i) {
 struct WinOption { int launcher_index; int w, h; const char *label; };
 static const WinOption WIN_OPTIONS[] = {
     { 0, 0, 0, "Fullscreen (borderless)" },
-    { 2, 3840, 2160, "Window 3840 x 2160" },
-    { 4, 3200, 1800, "Window 3200 x 1800" },
-    { 5, 2560, 1440, "Window 2560 x 1440" },
-    { 9, 1920, 1080, "Window 1920 x 1080" },
-    { 13, 1680, 945, "Window 1680 x 945" },
-    { 16, 1440, 810, "Window 1440 x 810" },
-    { 21, 1280, 720, "Window 1280 x 720" },
+    // every window size SnowLauncher offers (SnowLauncher.ini ClientWindow/LMWindow index); 16:9 ones are marked
+    { 2, 3840, 2160, "Window 3840 x 2160  16:9" },
+    { 3, 3440, 1440, "Window 3440 x 1440" },
+    { 4, 3200, 1800, "Window 3200 x 1800  16:9" },
+    { 5, 2560, 1440, "Window 2560 x 1440  16:9" },
+    { 6, 2560, 1080, "Window 2560 x 1080" },
+    { 7, 2048, 1536, "Window 2048 x 1536" },
+    { 8, 1920, 1200, "Window 1920 x 1200" },
+    { 9, 1920, 1080, "Window 1920 x 1080  16:9" },
+    { 10, 1920, 823, "Window 1920 x 823" },
+    { 11, 1792, 768, "Window 1792 x 768" },
+    { 12, 1680, 1050, "Window 1680 x 1050" },
+    { 13, 1680, 945, "Window 1680 x 945  16:9" },
+    { 14, 1600, 1200, "Window 1600 x 1200" },
+    { 15, 1440, 900, "Window 1440 x 900" },
+    { 16, 1440, 810, "Window 1440 x 810  16:9" },
+    { 17, 1400, 1050, "Window 1400 x 1050" },
+    { 18, 1280, 1024, "Window 1280 x 1024" },
+    { 19, 1280, 960, "Window 1280 x 960" },
+    { 20, 1280, 800, "Window 1280 x 800" },
+    { 21, 1280, 720, "Window 1280 x 720  16:9" },
+    { 22, 800, 640, "Window 800 x 640" },
+    { 23, 800, 600, "Window 800 x 600" },
+    { 24, 640, 480, "Window 640 x 480" },
+    { 25, 320, 240, "Window 320 x 240" },
 };
 static const int WIN_COUNT = sizeof(WIN_OPTIONS) / sizeof(WIN_OPTIONS[0]);
 static int win_saved = -1, win_selected = -1, win_saved_raw = -1;
@@ -1106,10 +1279,97 @@ static void tab_controls(void) {
     if (menu_combo_used) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Back / Start also open the menu when both are held for half a second.");
     hint("Holding the button presses the game's key for it (from config.ini). After Choose button, release all buttons and press the one you want.");
 
+    section("When the game isn't focused");
+    ImGui::Checkbox("Game ignores my keyboard and controller##unfocused", &cfg.ignore_unfocused);
+    hint("When you switch to another window (browser, Discord, ...) the game doesn't see what you type or press. "
+         "Without this, Windows keeps sending your keyboard and controller to the game in the background.");
+
     section("While the menu is open");
     ImGui::Checkbox("Game ignores my keyboard, mouse and controller", &cfg.block_input);
     hint("The game keeps running underneath (it can't be paused online). "
          "Controller: D-pad / left stick to move, A to select, B to go back, LB/RB to switch tabs.");
+}
+
+static void updates_section(void) {
+    const ImVec4 ok(0.45f, 0.9f, 0.55f, 1.0f), warn(1.0f, 0.7f, 0.3f, 1.0f), bad(1.0f, 0.35f, 0.35f, 1.0f);
+    static bool restart_failed;
+    section("Updates");
+    UpdInfo u; upd_info(&u);
+    switch (u.state) {
+        case UPD_IDLE: ImGui::TextUnformatted(cfg.auto_update ? "Not checked yet (the check runs a few seconds after the game starts)." : "Not checked yet."); break;
+        case UPD_CHECKING: ImGui::TextUnformatted("Checking for updates..."); break;
+        case UPD_LATEST: ImGui::TextColored(ok, "You have the latest version (%s).", OVERLAY_VERSION); break;
+        case UPD_AVAILABLE: ImGui::TextColored(warn, "Version %s is available (you have %s).", u.version, OVERLAY_VERSION); break;
+        case UPD_DOWNLOADING: {
+            ImGui::Text("Downloading version %s...", u.version);
+            float f = u.total ? (float)((double)u.done / (double)u.total) : 0.0f;
+            char lbl[64]; snprintf(lbl, sizeof(lbl), "%.1f / %.1f MB", u.done / 1e6, u.total / 1e6);
+            ImGui::ProgressBar(f, ImVec2(-1, 0), lbl);
+            break;
+        }
+        case UPD_INSTALLED: ImGui::TextColored(ok, "Version %s is installed. It starts with the next game start.", u.version); break;
+        case UPD_FAILED: ImGui::TextColored(bad, "%s", u.error); break;
+    }
+    if ((u.state == UPD_AVAILABLE || u.state == UPD_FAILED) && u.can_install && u.notes[0]) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped("%s", u.notes);
+        ImGui::PopStyleColor();
+    }
+    bool busy = u.state == UPD_CHECKING || u.state == UPD_DOWNLOADING;
+    if (u.can_install && (u.state == UPD_AVAILABLE || u.state == UPD_FAILED)) {
+        char lbl[64]; snprintf(lbl, sizeof(lbl), "Download and install %s", u.version);
+        if (ImGui::Button(lbl)) upd_install();
+        ImGui::SameLine();
+    }
+    if (u.state == UPD_INSTALLED) {
+        if (ImGui::Button("Restart game now")) restart_failed = !ov_restart_game();   // only returns on failure
+        ImGui::SameLine();
+        ImGui::TextColored(warn, "Not in the middle of an online match.");
+        if (restart_failed) ImGui::TextColored(bad, "Could not restart the game (see EXVSOverlay.log).");
+    } else {
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Check now")) upd_check_now();
+        ImGui::EndDisabled();
+    }
+    if (ImGui::Checkbox("Check for updates when the game starts", &cfg.auto_update)) save_config();
+    char h[200]; snprintf(h, sizeof(h), "Updates come from github.com/%s (releases). EXVS Launcher also keeps the overlay up to date.", u.repo);
+    hint(h);
+}
+
+static void tab_training(void) {
+    section("Training tools");
+    hint("Only in Training and in Practice vs CPU. They turn themselves off in every other mode, online included.");
+    if (ImGui::Checkbox("Frame meter", &cfg.fd_meter)) save_config();
+    hint("Two bars with the last 90 frames of you and your target, plus startup, total frames and frame advantage on hit after each attack. "
+         "While this menu is open you can drag it anywhere.");
+    if (cfg.fdm_x >= 0) { if (ImGui::Button("Put the meter back at the bottom")) { cfg.fdm_x = cfg.fdm_y = -1; save_config(); } }
+    if (ImGui::Checkbox("Hurtboxes", &cfg.fd_hurt)) save_config();
+    hint("Green circles: the body spheres where each unit can be hit (from the game's own data, placed on the live bones).");
+    if (ImGui::Checkbox("Hitboxes", &cfg.fd_hit)) save_config();
+    hint("Red circles: the attack spheres of melee moves, only during their active frames (from the game's action table). "
+         "Units from older series keep their moves in a script: no hitboxes for them yet.");
+    if (cfg.fd_hit && fd_active()) {
+        bool any = false; for (int i = 0; i < fd_unit_count(); i++) any |= fd_has_hitboxes(i);
+        if (!any) ImGui::TextDisabled("  No hitbox data for these units yet.");
+        else if (fd_learned() < 0) ImGui::TextDisabled("  Learning: land 3 melees with a dash (like N1). Until then those show when they hit.");
+    }
+    if (ImGui::Checkbox("Skeleton view (bones)", &cfg.fd_bones)) save_config();
+    hint("Draws every bone of each unit as a dot (you green, target red). First step of the hitbox viewer.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Status:"); ImGui::SameLine(); ImGui::TextUnformatted(fd_status());
+    if (fd_active()) {
+        ImGui::Text("Units found: %d   You: %s   Target: %s", fd_unit_count(), fd_player() >= 0 ? fd_unit_name(fd_player()) : "?", fd_target() >= 0 ? fd_unit_name(fd_target()) : "?");
+    }
+    section("Colors");
+    struct { int c; const char *t; } legend[] = { { FD_STARTUP, "Startup (until the hit)" }, { FD_ACTIVE, "Hit" }, { FD_RECOVERY, "Recovery" },
+        { FD_HITSTUN, "Hitstun" }, { FD_DOWN, "Knocked down" }, { FD_GUARD, "Guarding" }, { FD_FREE, "Free (can act)" } };
+    for (auto &l : legend) {
+        ImVec2 p = ImGui::GetCursorScreenPos(); float s = ImGui::GetTextLineHeight();
+        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + s, p.y + s), fd_color(l.c), 2);
+        ImGui::Dummy(ImVec2(s, s)); ImGui::SameLine(); ImGui::TextUnformatted(l.t);
+    }
+    hint("EXVS melee attacks home in on the target, so startup changes with distance: the meter shows what really happened. "
+         "Frame advantage is measured from when you can act again to when the target can.");
 }
 
 static void tab_about(void) {
@@ -1118,6 +1378,7 @@ static void tab_about(void) {
     ImGui::TextWrapped("Settings: %sEXVSOverlay.ini", ov_dir());
     ImGui::TextWrapped("Log: %sEXVSOverlay.log", ov_dir());
     hint("To remove it, delete xinput9_1_0.dll from the game folder (or turn it off in EXVS Launcher).");
+    updates_section();
 
     section("Credits");
     ImGui::Text("Created by Furshow");
@@ -1137,22 +1398,46 @@ void menu_draw(UINT w, UINT h) {
 
     if (cfg.show_pad) draw_pad_overlay(w, h);
     if (cfg.show_fps) draw_fps_counter(w, h);   // also while the menu is open, so it can be dragged
+    if (fd_active()) {
+        if (cfg.fd_hurt) draw_hurtboxes(w, h);
+        if (cfg.fd_hit) {
+            draw_spheres(w, h, fd_hit, IM_COL32(240, 50, 50, 90), IM_COL32(255, 70, 70, 240));
+            draw_spheres(w, h, [](int i, float (*o)[4], int m) { return i == 0 ? fd_proj(o, m) : 0; }, IM_COL32(250, 210, 40, 80), IM_COL32(255, 220, 50, 240));
+        }
+        if (cfg.fd_bones) draw_skeleton(w, h);
+        if (cfg.fd_meter) draw_frame_meter(w, h);
+    }
     if (!menu_open) return;
 
     const float s = base_scale;
-    ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    static bool menu_dragging;
+    if (!menu_dragging) {
+        if (cfg.menu_x >= 0) ImGui::SetNextWindowPos(ImVec2(cfg.menu_x * w, cfg.menu_y * h), ImGuiCond_Always);
+        else ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    }
     ImGui::SetNextWindowSize(ImVec2(720.0f * s, 660.0f * s), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(cfg.opacity);
     bool open = true;
     char title[64]; snprintf(title, sizeof(title), "EXVS Overlay  %s###menu", OVERLAY_VERSION);
-    if (ImGui::Begin(title, &open, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+    if (ImGui::Begin(title, &open, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+        {   // dragged by its title bar: remember where (fraction of the screen, kept inside it)
+            ImGuiWindow *win = ImGui::GetCurrentWindow();
+            menu_dragging = ImGui::GetCurrentContext()->MovingWindow == win;
+            if (menu_dragging) {
+                ImVec2 p = ImGui::GetWindowPos(), sz = ImGui::GetWindowSize();
+                p.x = p.x < 0 ? 0 : (p.x + sz.x > w ? w - sz.x : p.x); p.y = p.y < 0 ? 0 : (p.y + sz.y > h ? h - sz.y : p.y);
+                cfg.menu_x = p.x / (float)w; cfg.menu_y = p.y / (float)h;
+            }
+        }
         // test host only: EXVSOVERLAY_TEST_TAB=display opens that tab, EXVSOVERLAY_TEST_RES=<ini value> saves it
-        static int test_init = 0; ImGuiTabItemFlags display_flags = 0, controls_flags = 0, graphics_flags = 0;
+        static int test_init = 0; ImGuiTabItemFlags display_flags = 0, controls_flags = 0, graphics_flags = 0, about_flags = 0, training_flags = 0;
         if (!test_init) {
             test_init = 1; char v[16];
             if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_TAB", v, sizeof(v)) && _stricmp(v, "display") == 0) display_flags = ImGuiTabItemFlags_SetSelected;
             if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_TAB", v, sizeof(v)) && _stricmp(v, "controls") == 0) controls_flags = ImGuiTabItemFlags_SetSelected;
             if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_TAB", v, sizeof(v)) && _stricmp(v, "graphics") == 0) graphics_flags = ImGuiTabItemFlags_SetSelected;
+            if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_TAB", v, sizeof(v)) && _stricmp(v, "about") == 0) about_flags = ImGuiTabItemFlags_SetSelected;
+            if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_TAB", v, sizeof(v)) && _stricmp(v, "training") == 0) training_flags = ImGuiTabItemFlags_SetSelected;
             if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_RES", v, sizeof(v))) {
                 res_reload(); int i = res_find(v);
                 if (i >= 0) { res_apply(i); res_reload_pending = true; }
@@ -1168,18 +1453,24 @@ void menu_draw(UINT w, UINT h) {
         }
         float footer = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y;
         if (ImGui::BeginChild("body", ImVec2(0, -footer))) {
+            UpdInfo u; upd_info(&u);
+            if (u.state == UPD_AVAILABLE) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Update available: version %s (About > Updates).", u.version);
+            else if (u.state == UPD_INSTALLED) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.55f, 1.0f), "Version %s is installed: restart the game to use it.", u.version);
             if (ImGui::BeginTabBar("tabs")) {
                 if (ImGui::BeginTabItem("Info")) { tab_info(w, h); ImGui::EndTabItem(); }
                 if (ImGui::BeginTabItem("Display", NULL, display_flags)) { tab_display(); ImGui::EndTabItem(); }
                 if (ImGui::BeginTabItem("Graphics", NULL, graphics_flags)) { tab_graphics(); ImGui::EndTabItem(); }
                 if (ImGui::BeginTabItem("Controls", NULL, controls_flags)) { tab_controls(); ImGui::EndTabItem(); }
-                if (ImGui::BeginTabItem("About")) { tab_about(); ImGui::EndTabItem(); }
+                if (ImGui::BeginTabItem("Training", NULL, training_flags)) { tab_training(); ImGui::EndTabItem(); }
+                if (ImGui::BeginTabItem("About", NULL, about_flags)) { tab_about(); ImGui::EndTabItem(); }
                 ImGui::EndTabBar();
             }
         }
         ImGui::EndChild();
         char close_label[96]; snprintf(close_label, sizeof(close_label), "Close  (%s)", key_name(cfg.toggle_vk));
-        if (ImGui::Button(close_label, ImVec2(-1, 0))) open = false;
+        float cw = cfg.menu_x >= 0 ? ImGui::GetContentRegionAvail().x - 160.0f * s : -1;
+        if (ImGui::Button(close_label, ImVec2(cw, 0))) open = false;
+        if (cfg.menu_x >= 0) { ImGui::SameLine(); if (ImGui::Button("Center menu", ImVec2(-1, 0))) { cfg.menu_x = cfg.menu_y = -1; save_config(); } }
     }
     ImGui::End();
     if (!open) set_open(false);

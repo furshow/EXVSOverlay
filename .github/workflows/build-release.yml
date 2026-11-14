@@ -1,0 +1,118 @@
+# Builds xinput9_1_0.dll on GitHub and prepares the release.
+#
+#   git tag v1.0.0 && git push origin v1.0.0      (on main, after merging the Release/x.y.z branch)
+#
+# -> builds the DLL (same recipe as build.sh), runs the tests that need no GPU, and creates a DRAFT release
+#    of that tag with xinput9_1_0.dll attached and the notes of that version from CHANGELOG.md (or from
+#    docs/release_notes/v<version>.md if that file exists). Review / edit the notes on GitHub and press
+#    "Publish release": only then do the overlay's updater and EXVS Launcher's build see it (a draft never
+#    reaches the users).
+#
+# Run by hand (Actions -> Build release -> Run workflow) it only builds: the DLL is in the run's
+# "Artifacts" section, to test a build without making a release.
+name: Build release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version (and tag must match it)
+        id: v
+        run: |
+          version=$(sed -n 's/^#define OVERLAY_VERSION "\(.*\)"/\1/p' src/menu.h)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match OVERLAY_VERSION \"$version\" in src/menu.h. The updater compares the tag, so users would be offered the wrong version."
+            exit 1
+          fi
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PY: python
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install zig
+        run: python -m pip install ziglang==0.16.0
+      - name: Build xinput9_1_0.dll
+        run: bash build.sh
+      - name: Check the DLL
+        run: |
+          v='${{ needs.check.outputs.version }}'
+          ls -la build/xinput9_1_0.dll
+          grep -q -a "EXVSOverlayVersion=$v;" build/xinput9_1_0.dll || { echo "::error::The DLL does not say version $v"; exit 1; }
+      - name: Test (input while the game isn't focused)
+        run: |
+          Z="python -m ziglang c++ -target x86_64-windows-gnu -O1 -std=c++17"
+          mkdir -p ftest
+          $Z -DFAKE_HID -shared -o ftest/hid.dll test/focus_test.cpp
+          $Z -DFAKE_LOADER -shared -o ftest/bngrw.dll test/focus_test.cpp -lhid -luser32
+          $Z -o ftest/focus_test.exe test/focus_test.cpp
+          cp build/xinput9_1_0.dll ftest/ov.dll
+          cd ftest
+          export EXVSOVERLAY_NO_UPDATE=1
+          printf '[Overlay]\nignore_unfocused=1\n' > EXVSOverlay.ini
+          ./focus_test.exe ov.dll block      # this process never has the focus
+          printf '[Overlay]\nignore_unfocused=0\n' > EXVSOverlay.ini
+          ./focus_test.exe ov.dll pass
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: build/xinput9_1_0.dll
+          if-no-files-found: error
+
+  release:
+    needs: [check, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
+      - name: Release notes
+        run: |
+          v='${{ needs.check.outputs.version }}'
+          if [ -f "docs/release_notes/v$v.md" ]; then
+            cp "docs/release_notes/v$v.md" notes.md
+          else                       # the "## [x.y.z]" section of CHANGELOG.md, without its heading
+            awk -v v="$v" '
+              /^## \[/ { if (on) exit; if (index($0, "## [" v "]") == 1) { on = 1; next } }
+              on' CHANGELOG.md > notes.md
+          fi
+          [ -s notes.md ] || echo "EXVS Overlay $v" > notes.md
+          cat notes.md
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          ls -la files
+          test -f files/xinput9_1_0.dll   # the updater downloads exactly this asset name
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" files/* --clobber          # already made (by hand or a re-run): only the files
+          else
+            gh release create "$tag" files/* --draft --verify-tag \
+              --title "EXVS Overlay ${{ needs.check.outputs.version }}" --notes-file notes.md
+          fi
+          echo "::notice::Draft release ready: review it and press Publish -> https://github.com/$GITHUB_REPOSITORY/releases"
