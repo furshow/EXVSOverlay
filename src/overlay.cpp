@@ -19,6 +19,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
 #include "menu.h"
+#include "framedata.h"
 #include "upscale.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -543,9 +544,12 @@ static DWORD WINAPI init_thread(LPVOID) {
     char old[MAX_PATH]; snprintf(old, sizeof(old), "%sxinput9_1_0.old.dll", g_dir);
     if (DeleteFileA(old)) ov_log("removed leftover %s", old);
     menu_load_config();
+    upd_startup(menu_enabled() && menu_auto_update());
     if (!menu_enabled()) { ov_log("overlay disabled in EXVSOverlay.ini (enabled=0)"); return 0; }
+    focus_init();                         // keyboard / controller while the game isn't focused
     if (menu_hud_enabled()) hud_init();   // hide-HUD detours: early, before the game draws any HUD
     if (!install_hooks()) ov_log("hook installation failed; the game runs normally without the overlay");
+    fd_init(GetCurrentProcess(), (uintptr_t)GetModuleHandleW(NULL));   // Training tools (checks the exe version itself)
     return 0;
 }
 

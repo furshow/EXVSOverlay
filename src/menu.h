@@ -2,7 +2,10 @@
 #pragma once
 #include <windows.h>
 
-#define OVERLAY_VERSION "0.12.0"
+#define OVERLAY_VERSION "0.15.0"
+#define OVERLAY_WIDEN2_(x) L##x
+#define OVERLAY_WIDEN_(x) OVERLAY_WIDEN2_(x)
+#define OVERLAY_VERSION_W OVERLAY_WIDEN_(OVERLAY_VERSION)
 
 // Own copies of the XInput structs (including xinput.h would clash with our exported functions).
 struct XINPUT_GAMEPAD_ { WORD wButtons; BYTE bLeftTrigger, bRightTrigger; SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; };
@@ -27,8 +30,22 @@ const char *hud_version(void);
 struct UpStatus { bool wanted, active, failed; UINT game_w, game_h, out_w, out_h; int path; };
 void up_status(UpStatus *s);
 
+// update.cpp (updates from the GitHub releases)
+enum { UPD_IDLE, UPD_CHECKING, UPD_LATEST, UPD_AVAILABLE, UPD_DOWNLOADING, UPD_INSTALLED, UPD_FAILED };
+struct UpdInfo { int state; const char *version, *notes, *error, *repo; unsigned long long done, total; bool can_install; };
+bool upd_supported(void);
+void upd_startup(bool auto_check);   // init thread: cleanup + (optionally) a check ~20 s later
+void upd_check_now(void);
+void upd_install(void);              // download + swap the DLL; used from the next game start
+void upd_info(UpdInfo *u);
+
+// input_focus.cpp (input while the game isn't focused)
+void focus_init(void);
+long focus_blocked_calls(void);
+
 // menu.cpp
-int menu_upscale_mode(void);         // 0 off, 1 FSR 1
+bool menu_auto_update(void);
+int menu_upscale_mode(void);        // 0 off, 1 FSR 1
 float menu_upscale_sharpness(void);  // 0..1 (RCAS strength)
 void menu_load_config(void);
 bool menu_hud_enabled(void);
@@ -39,6 +56,7 @@ void menu_tick_frame(void);       // every Present: timing + hotkeys
 bool menu_should_draw(void);      // menu open or FPS counter on
 bool menu_is_open(void);
 bool menu_blocks_input(void);
+bool menu_game_input_blocked(void);   // menu open, or the game isn't focused (option)
 void menu_filter_gamepad(XINPUT_GAMEPAD_ *g);   // what the game sees (menu open / card button hidden)
 void menu_feed_gamepad(void);     // between backend NewFrame and ImGui::NewFrame
 void menu_draw(UINT bb_width, UINT bb_height);
