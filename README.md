@@ -87,6 +87,11 @@ To publish a version:
    **Publish**: from then on the overlay's updater offers it.
 4. To bundle it in EXVS Launcher, put the version in the launcher's `overlay-version.txt` and release the launcher.
 
+## Support
+If this overlay is useful to you, you can support its development. It's optional, and everything stays free.
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/N3L02AMSOT)
+
 ## License
 MIT, see [LICENSE](LICENSE). Third-party code (Dear ImGui, AMD FidelityFX FSR 1, both MIT) is listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
