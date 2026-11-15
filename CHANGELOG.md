@@ -3,6 +3,19 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.0.1] - 2026-11-14
+### Controllers
+- DirectInput controllers (arcade sticks in PS3/PS4 mode, e.g. Hori Fighting Stick Mini 4) now show in the
+  controller overlay and work for the menu (Back + Start, navigation). They're read from what the game's
+  loader already receives, with the PS3/PS4 button order (Square, Cross, Circle, Triangle, L1, R1, L2, R2...).
+- New look for the arcade-stick controller overlay, in the style of fighting-game training modes: a rounded
+  octagonal gate where the ball slides to each direction and leaves a fading light trail, and each button has its own
+  colour (dim at rest, lit when pressed).
+
+### Menu
+- More details in `EXVSOverlay.log` when the mouse doesn't work in the menu (focus, cursor position, window size),
+  to help with bug reports.
+
 ## [1.0.0] - 2026-11-14
 First public release.
 

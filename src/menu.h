@@ -2,7 +2,7 @@
 #pragma once
 #include <windows.h>
 
-#define OVERLAY_VERSION "1.0.0"
+#define OVERLAY_VERSION "1.0.1"
 #define OVERLAY_WIDEN2_(x) L##x
 #define OVERLAY_WIDEN_(x) OVERLAY_WIDEN2_(x)
 #define OVERLAY_VERSION_W OVERLAY_WIDEN_(OVERLAY_VERSION)
@@ -42,6 +42,7 @@ void upd_info(UpdInfo *u);
 // input_focus.cpp (input while the game isn't focused)
 void focus_init(void);
 long focus_blocked_calls(void);
+bool focus_hid_pad(XINPUT_GAMEPAD_ *g);   // latest DirectInput (HID) pad the loader read, as an Xbox pad
 
 // menu.cpp
 bool menu_auto_update(void);

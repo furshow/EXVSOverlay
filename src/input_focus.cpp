@@ -72,9 +72,97 @@ static UINT WINAPI h_GetRawInputData(HRAWINPUT h, UINT cmd, LPVOID data, PUINT s
     return r;
 }
 
+// ---- HID controllers seen by the loader (for the overlay's input display and menu) --------------
+// DirectInput-mode pads (arcade sticks in PS3/PS4 mode, e.g. Hori Fighting Stick Mini 4) have no XInput
+// state. The loader parses their reports with HidP_*, so the real values are recorded here, per device
+// (its preparsed data), before any blocking. focus_hid_pad() turns the latest one into an Xbox-style pad.
+struct HidPad {
+    void *pp; ULONGLONG tick; DWORD buttons;   // bit n = HID button n+1
+    ULONG hat; bool hat_seen; LONG hat_lo, hat_hi;
+    ULONG xy[2]; bool xy_seen[2]; LONG xy_lo[2], xy_hi[2]; USHORT xy_bits[2];
+};
+static HidPad g_hid[4];
+static SRWLOCK g_hid_lock = SRWLOCK_INIT;
+
+static HidPad *hid_slot(void *pp) {   // call with the lock held exclusively
+    HidPad *oldest = &g_hid[0];
+    for (auto &h : g_hid) {
+        if (h.pp == pp) return &h;
+        if (h.tick < oldest->tick) oldest = &h;
+    }
+    memset(oldest, 0, sizeof(*oldest)); oldest->pp = pp;
+    ov_log("input: DirectInput controller read by the loader (%p): shown in the controller overlay", pp);
+    return oldest;
+}
+static bool value_range(int type, USHORT page, USHORT link, USHORT usage, void *pp, LONG *lo, LONG *hi, USHORT *bits) {
+    if (!rHidP_GetSpecificValueCaps) return false;
+    HidValueCaps_ caps[2]; USHORT n = 2;
+    if (rHidP_GetSpecificValueCaps(type, page, link, usage, caps, &n, pp) != HIDP_STATUS_SUCCESS_ || n < 1) return false;
+    *lo = caps[0].LogicalMin; *hi = caps[0].LogicalMax; if (bits) *bits = caps[0].BitSize;
+    return true;
+}
+static void hid_record_buttons(void *pp, const USHORT *list, ULONG n) {
+    DWORD b = 0;
+    for (ULONG i = 0; i < n; i++) if (list[i] >= 1 && list[i] <= 32) b |= 1u << (list[i] - 1);
+    AcquireSRWLockExclusive(&g_hid_lock);
+    HidPad *h = hid_slot(pp); h->buttons = b; h->tick = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_hid_lock);
+}
+static void hid_record_value(int type, USHORT page, USHORT link, USHORT usage, ULONG v, void *pp) {
+    if (page != 0x01 || (usage != 0x39 && usage != 0x30 && usage != 0x31)) return;
+    AcquireSRWLockExclusive(&g_hid_lock);
+    HidPad *h = hid_slot(pp);
+    if (usage == 0x39) {
+        if (!h->hat_seen) { USHORT bits = 0; if (!value_range(type, page, link, usage, pp, &h->hat_lo, &h->hat_hi, &bits)) { h->hat_lo = 0; h->hat_hi = 7; } h->hat_seen = true; }
+        h->hat = v;
+    } else {
+        int a = usage - 0x30;
+        if (!h->xy_seen[a]) { if (!value_range(type, page, link, usage, pp, &h->xy_lo[a], &h->xy_hi[a], &h->xy_bits[a]) || h->xy_hi[a] <= h->xy_lo[a]) { h->xy_lo[a] = 0; h->xy_hi[a] = 255; h->xy_bits[a] = 0; } h->xy_seen[a] = true; }
+        h->xy[a] = v;
+    }
+    h->tick = GetTickCount64();
+    ReleaseSRWLockExclusive(&g_hid_lock);
+}
+
+// Latest DirectInput pad as an Xbox pad, with the usual PS3/PS4 button order (1 Square, 2 Cross, 3 Circle,
+// 4 Triangle, 5 L1, 6 R1, 7 L2, 8 R2, 9 Share/Select, 10 Options/Start, 11 L3, 12 R3). False when the
+// loader hasn't read any HID pad in the last two minutes.
+bool focus_hid_pad(XINPUT_GAMEPAD_ *g) {
+    memset(g, 0, sizeof(*g));
+    AcquireSRWLockShared(&g_hid_lock);
+    const HidPad *best = NULL;
+    for (auto &h : g_hid) if (h.pp && (!best || h.tick > best->tick)) best = &h;
+    HidPad p = {}; if (best) p = *best;
+    ReleaseSRWLockShared(&g_hid_lock);
+    if (!best || GetTickCount64() - p.tick > 120000) return false;
+    static const WORD map[12] = { 0x4000, 0x1000, 0x2000, 0x8000, 0x0100, 0x0200, 0, 0, 0x0020, 0x0010, 0x0040, 0x0080 };
+    for (int i = 0; i < 12; i++) if (p.buttons & (1u << i)) g->wButtons |= map[i];
+    if (p.buttons & (1u << 6)) g->bLeftTrigger = 255;
+    if (p.buttons & (1u << 7)) g->bRightTrigger = 255;
+    if (p.hat_seen) {
+        LONG d = (LONG)p.hat - p.hat_lo;   // 0 = up, clockwise in 45° steps; out of range = centred
+        if (d >= 0 && d <= 7 && (LONG)p.hat <= p.hat_hi) {
+            static const WORD dirs[8] = { 0x1, 0x1 | 0x8, 0x8, 0x8 | 0x2, 0x2, 0x2 | 0x4, 0x4, 0x4 | 0x1 };
+            g->wButtons |= dirs[d];
+        }
+    }
+    for (int a = 0; a < 2; a++) {
+        if (!p.xy_seen[a]) continue;
+        LONG lo = p.xy_lo[a], hi = p.xy_hi[a], v = (LONG)p.xy[a];
+        USHORT bits = p.xy_bits[a];   // values come unsigned: sign-extend for a signed range
+        if (lo < 0 && bits > 0 && bits < 32 && (p.xy[a] & (1u << (bits - 1)))) v = (LONG)(p.xy[a] | ~((1u << bits) - 1));
+        double t = (double)(v - lo) / (double)(hi - lo) * 2.0 - 1.0;   // -1..1
+        if (t < -1) t = -1; if (t > 1) t = 1;
+        SHORT s = (SHORT)(t * 32767.0);
+        if (a == 0) g->sThumbLX = s; else g->sThumbLY = (SHORT)-s;   // HID Y grows downwards
+    }
+    return true;
+}
+
 // ---- HID controllers (DirectInput mode) ---------------------------------------------------------
 static NTSTATUS_ WINAPI h_HidP_GetUsages(int type, USHORT page, USHORT link, USHORT *list, ULONG *len, void *pp, char *rep, ULONG rlen) {
     NTSTATUS_ st = rHidP_GetUsages(type, page, link, list, len, pp, rep, rlen);
+    if (st == HIDP_STATUS_SUCCESS_ && len && list && type == 0 /*HidP_Input*/ && page == 0x09) hid_record_buttons(pp, list, *len);
     if (st == HIDP_STATUS_SUCCESS_ && len && blocked()) *len = 0;   // no button pressed
     return st;
 }
@@ -125,6 +213,7 @@ done:
 static NTSTATUS_ WINAPI h_HidP_GetUsageValue(int type, USHORT page, USHORT link, USHORT usage, ULONG *value, void *pp, char *rep, ULONG rlen) {
     NTSTATUS_ st = rHidP_GetUsageValue(type, page, link, usage, value, pp, rep, rlen);
     if (st != HIDP_STATUS_SUCCESS_ || !value) return st;
+    if (type == 0 /*HidP_Input*/) hid_record_value(type, page, link, usage, *value, pp);
     if (!blocked()) { remember_value(pp, page, link, usage, *value); return st; }
     ULONG v; if (neutral_value(pp, type, page, link, usage, &v)) *value = v;
     return st;

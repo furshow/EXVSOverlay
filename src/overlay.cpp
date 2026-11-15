@@ -13,6 +13,7 @@
 #include <dxgi1_4.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include <math.h>
 
 #include "imgui.h"
@@ -172,28 +173,94 @@ static volatile LONG g_mouse_msgs;   // mouse messages seen while the menu is op
 
 // The game doesn't always deliver mouse messages to the window the overlay hooks (the loader can
 // capture them), so while the menu is open the mouse is also read straight from Windows each frame.
-static void poll_mouse(void) {
-    static bool was_open; static LONG msgs_at_open; static int downs;
-    bool open = menu_is_open();
-    if (open != was_open) {
-        if (open) { msgs_at_open = g_mouse_msgs; downs = 0; }
-        else ov_log("mouse while the menu was open: %ld window messages, %d clicks read directly", g_mouse_msgs - msgs_at_open, downs);
-        was_open = open;
-    }
-    if (!open || !g_hwnd) return;
+// Mouse diagnostics while the menu is open: a few samples while it's open and a summary when it
+// closes, so a "no cursor in the menu" report can be told apart (no focus / mouse outside / no input).
+static struct {
+    LONG msgs_at_open; int downs, frames, unfocused, outside, samples;
+    DWORD opened_at, last_fg_pid;
+} g_md;
+
+static void exe_name_of(DWORD pid, char *out, DWORD n) {
+    out[0] = 0;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) { snprintf(out, n, "?"); return; }
+    char path[MAX_PATH]; DWORD len = MAX_PATH;
+    if (QueryFullProcessImageNameA(h, 0, path, &len)) {
+        const char *b = strrchr(path, '\\');
+        snprintf(out, n, "%s", b ? b + 1 : path);
+    } else snprintf(out, n, "?");
+    CloseHandle(h);
+}
+
+static void log_mouse_sample(const char *when) {
     HWND fg = GetForegroundWindow();
     DWORD pid = 0; if (fg) GetWindowThreadProcessId(fg, &pid);
-    if (pid != GetCurrentProcessId()) return;   // only when the game has focus
+    char exe[64]; exe_name_of(pid, exe, sizeof exe);
+    bool fg_game = pid == GetCurrentProcessId();
+    POINT s = {}, c = {};
+    BOOL have = GetCursorPos(&s);
+    c = s; if (g_hwnd) ScreenToClient(g_hwnd, &c);
+    RECT wr = {}; if (g_hwnd) GetWindowRect(g_hwnd, &wr);
+    float mx = -1, my = -1; bool valid = false;
+    if (g_imgui_ready) {
+        EnterCriticalSection(&g_imgui_cs);
+        ImVec2 m = ImGui::GetIO().MousePos; mx = m.x; my = m.y; valid = ImGui::IsMousePosValid(&m);
+        LeaveCriticalSection(&g_imgui_cs);
+    }
+    char mpos[48];
+    if (!g_imgui_ready) snprintf(mpos, sizeof mpos, "not ready");
+    else if (!valid) snprintf(mpos, sizeof mpos, "none (no cursor is drawn)");
+    else snprintf(mpos, sizeof mpos, "%.0f,%.0f", mx, my);
+    ov_log("mouse %s: cursor %s%ld,%ld (client %ld,%ld), window %ld,%ld-%ld,%ld client %ldx%ld backbuffer %ux%u, "
+           "foreground %s (pid %lu %s, hwnd %s game's), menu mouse %s",
+           when, have ? "" : "unknown ", s.x, s.y, c.x, c.y, wr.left, wr.top, wr.right, wr.bottom,
+           (long)g_client_w, (long)g_client_h, g_bb_width, g_bb_height,
+           fg_game ? "is the game" : "is NOT the game", pid, exe, fg == g_hwnd ? "=" : "!=",
+           mpos);
+}
+
+// every frame, also while nothing is drawn (so the menu closing is always noticed)
+static void mouse_diag_tick(void) {
+    static bool was_open;
+    bool open = menu_is_open();
+    if (open != was_open) {
+        was_open = open;
+        if (open) {
+            memset(&g_md, 0, sizeof g_md);
+            g_md.msgs_at_open = g_mouse_msgs; g_md.opened_at = GetTickCount();
+        } else {
+            char exe[64] = "-"; if (g_md.unfocused) exe_name_of(g_md.last_fg_pid, exe, sizeof exe);
+            ov_log("mouse while the menu was open: %ld window messages, %d clicks read directly, %d frames read, "
+                   "%d frames without focus (last foreground: %s), %d frames with the mouse outside the game",
+                   g_mouse_msgs - g_md.msgs_at_open, g_md.downs, g_md.frames, g_md.unfocused, exe, g_md.outside);
+        }
+    }
+    if (!open) return;
+    static const DWORD at_ms[] = { 1000, 4000, 10000 };
+    if (g_md.samples < 3 && GetTickCount() - g_md.opened_at >= at_ms[g_md.samples]) {
+        char when[32]; snprintf(when, sizeof when, "%lus after opening", at_ms[g_md.samples] / 1000);
+        log_mouse_sample(when);
+        g_md.samples++;
+    }
+}
+
+static void poll_mouse(void) {
+    if (!menu_is_open() || !g_hwnd) return;
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0; if (fg) GetWindowThreadProcessId(fg, &pid);
+    if (pid != GetCurrentProcessId()) { g_md.unfocused++; g_md.last_fg_pid = pid; return; }   // only when the game has focus
     POINT p; if (!GetCursorPos(&p) || !ScreenToClient(g_hwnd, &p)) return;
+    g_md.frames++;
     ImGuiIO &io = ImGui::GetIO();
     float x = (float)p.x, y = (float)p.y;
     if (g_client_w > 0 && g_client_h > 0) { x = x * g_bb_width / g_client_w; y = y * g_bb_height / g_client_h; }
+    if (x < 0 || y < 0 || x >= g_bb_width || y >= g_bb_height) g_md.outside++;
     io.AddMousePosEvent(x, y);
     static bool prev[3];
     const int vks[3] = { VK_LBUTTON, VK_RBUTTON, VK_MBUTTON };
     for (int i = 0; i < 3; i++) {
         bool down = (GetAsyncKeyState(vks[i]) & 0x8000) != 0;
-        if (down != prev[i]) { io.AddMouseButtonEvent(i, down); prev[i] = down; if (down && i == 0) downs++; }
+        if (down != prev[i]) { io.AddMouseButtonEvent(i, down); prev[i] = down; if (down && i == 0) g_md.downs++; }
     }
 }
 
@@ -282,6 +349,7 @@ static void render_overlay(IDXGISwapChain *sc_base) {
     }
     menu_tick_frame();                       // frame timing + hotkey polling, even when hidden
     if (g_init_failed || !g_queue) return;
+    mouse_diag_tick();
 
     IDXGISwapChain3 *sc = NULL;
     if (FAILED(sc_base->QueryInterface(IID_PPV_ARGS(&sc)))) return;
