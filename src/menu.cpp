@@ -13,6 +13,7 @@
 
 static const int ARCADE_COUNT = 2;   // Card, Coin
 static XINPUT_GAMEPAD_ test_pad; static bool test_pad_set;   // EXVSOVERLAY_TEST_PAD="buttons,lx,ly,rx,ry,lt,rt"
+static WORD test_pad_b2; static int test_pad_switch = -1;   // EXVSOVERLAY_TEST_PAD2="buttons,frame": other buttons from that frame on (trail test)
 
 // ---------------------------------------------------------------------------------------------
 // Settings
@@ -145,6 +146,7 @@ void menu_load_config(void) {
             test_pad = { (WORD)v[0], (BYTE)v[5], (BYTE)v[6], (SHORT)v[1], (SHORT)v[2], (SHORT)v[3], (SHORT)v[4] };
             test_pad_set = true; cfg.show_pad = true;
         }
+        if (GetEnvironmentVariableA("EXVSOVERLAY_TEST_PAD2", tp, sizeof(tp))) { int b2 = 0, fr = -1; sscanf(tp, "%i,%i", &b2, &fr); test_pad_b2 = (WORD)b2; test_pad_switch = fr; }
     }
     ini_get_float("pad_x", &cfg.pad_x); ini_get_float("pad_y", &cfg.pad_y);
     ini_get_float("fps_x", &cfg.fps_x); ini_get_float("fps_y", &cfg.fps_y);
@@ -199,8 +201,11 @@ static LARGE_INTEGER qpf, last_present;
 static float fps_display; static double fps_accum_t; static int fps_accum_n;
 
 // controller polling (disconnected pads are slow to query, so retry them only every 2 s)
-static bool pad_connected[4]; static DWORD pad_retry_at[4];
-static XINPUT_STATE_ pad_state[4]; static int active_pad = -1;
+// Slots 0-3: XInput pads. Slot 4 (HID_PAD): the DirectInput pad the loader reads (arcade sticks in
+// PS3/PS4 mode), recorded by input_focus.cpp. The card button only uses the XInput slots.
+static const int PAD_SLOTS = 5, HID_PAD = 4;
+static bool pad_connected[PAD_SLOTS]; static DWORD pad_retry_at[4];
+static XINPUT_STATE_ pad_state[PAD_SLOTS]; static int active_pad = -1;
 static bool prev_combo, prev_key;
 static void card_tick(bool focus);
 static bool card_capture_armed;
@@ -251,6 +256,8 @@ static void poll_pads(void) {
             memset(&pad_state[i], 0, sizeof(pad_state[i]));
         }
     }
+    pad_connected[HID_PAD] = focus_hid_pad(&pad_state[HID_PAD].Gamepad);
+    if (active_pad < 0 && pad_connected[HID_PAD]) active_pad = HID_PAD;
 }
 
 static int *rebind_target = &cfg.toggle_vk;   // which key "Change key" is setting
@@ -306,7 +313,7 @@ void menu_tick_frame(void) {
     bool combo = false;
     if (cfg.pad_toggle && active_pad >= 0) {
         const WORD need = 0x0010 /*START*/ | 0x0020 /*BACK*/;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < PAD_SLOTS; i++)
             if (pad_connected[i] && (pad_state[i].Gamepad.wButtons & need) == need) combo = true;
     }
     // Back + Start must be held for half a second: tapping Back (e.g. as the card button) while holding
@@ -746,36 +753,95 @@ static void draw_arcade_overlay(UINT w, UINT h, const XINPUT_GAMEPAD_ *g) {
             if (fabsf(sx) > 0.45f) dx = sx > 0 ? 1.0f : -1.0f;
             if (fabsf(sy) > 0.45f) dy = sy > 0 ? 1.0f : -1.0f;
         }
-        if (dx != 0 && dy != 0) { dx *= 0.7071f; dy *= 0.7071f; }
+        // fighting-game training style: square gate with 8 marks, a ball that slides to the direction and
+        // leaves a light trail behind it (from where it was, fading out in a fraction of a second)
         const ImVec2 lc = P(125, 135);
-        // octagonal gate + direction marks
-        ImVec2 oct[8];
-        for (int i = 0; i < 8; i++) { float t = (i * 45.0f + 22.5f) * 3.14159265f / 180.0f; oct[i] = ImVec2(lc.x + cosf(t) * 88 * k, lc.y + sinf(t) * 88 * k); }
-        dl->AddPolyline(oct, 8, line_c, ImDrawFlags_Closed, 3 * k);
-        for (int i = 0; i < 8; i++) {
-            float t = i * 45.0f * 3.14159265f / 180.0f, cx = cosf(t), cy = sinf(t);
-            bool on = (dx != 0 || dy != 0) && fabsf(cx - dx / sqrtf(dx * dx + dy * dy)) < 0.2f && fabsf(cy - dy / sqrtf(dx * dx + dy * dy)) < 0.2f;
-            dl->AddCircleFilled(ImVec2(lc.x + cx * 72 * k, lc.y + cy * 72 * k), 6 * k, on ? on_c : rim_c, 12);
-        }
-        dl->AddCircleFilled(lc, 24 * k, dark_c, 32);
-        ImVec2 ball(lc.x + dx * 46 * k, lc.y + dy * 46 * k);
-        dl->AddLine(lc, ball, rim_c, 12 * k);
+        // gate: a rounded octagon (long, slightly bulging sides and short cut corners); the 8 marks sit on its
+        // outline and the ball goes to them: straight directions to the middle of a side, diagonals to a corner
+        const float S = 72.0f, BULGE = 84.0f, CUT = 24.0f;   // side line, bulge control point, corner cut
+        const float RO = (S + BULGE) * 0.5f, RD = S - CUT * 0.5f;   // centre -> straight mark / diagonal mark
         const bool moved = dx != 0 || dy != 0;
-        dl->AddCircleFilled(ball, 36 * k, ImGui::GetColorU32(moved ? ImVec4(1.0f, 0.36f, 0.30f, a) : ImVec4(0.86f, 0.22f, 0.20f, a)), 40);
-        dl->AddCircleFilled(ImVec2(ball.x - 11 * k, ball.y - 12 * k), 10 * k, ImGui::GetColorU32(ImVec4(1, 1, 1, a * 0.35f)), 16);   // shine
+        const ImU32 gate_c = ImGui::GetColorU32(ImVec4(0.80f, 0.82f, 0.88f, a * 0.55f));
+        auto gate_path = [&]() {
+            // corners clockwise from the top-right, each side bulges out through a quadratic curve
+            const float cx[4] = { 1, 1, -1, -1 }, cy[4] = { -1, 1, 1, -1 };
+            for (int i = 0; i < 4; i++) {
+                float sx = cx[i], sy = cy[i];
+                // the corner cut goes from the end of one side to the start of the next
+                ImVec2 a0 = (i % 2 == 0) ? P(125 + sx * (S - CUT), 135 + sy * S) : P(125 + sx * S, 135 + sy * (S - CUT));
+                ImVec2 a1 = (i % 2 == 0) ? P(125 + sx * S, 135 + sy * (S - CUT)) : P(125 + sx * (S - CUT), 135 + sy * S);
+                (void)a0;   // reached by the previous side (the last side ends at corner 0: the path closes there)
+                dl->PathLineTo(a1);
+                // next side: to the start of the next corner, bulging outwards
+                float nx = cx[(i + 1) % 4], ny = cy[(i + 1) % 4];
+                ImVec2 b0 = ((i + 1) % 2 == 0) ? P(125 + nx * (S - CUT), 135 + ny * S) : P(125 + nx * S, 135 + ny * (S - CUT));
+                ImVec2 ctl = (i % 2 == 0) ? P(125 + sx * BULGE, 135) : P(125, 135 + sy * BULGE);
+                dl->PathBezierQuadraticCurveTo(ctl, b0, 16);
+            }
+        };
+        gate_path(); dl->PathFillConvex(ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, a * 0.25f)));
+        gate_path(); dl->PathStroke(gate_c, ImDrawFlags_Closed, 2.5f * k);
+        const float sgx = dx > 0 ? 1.0f : dx < 0 ? -1.0f : 0.0f, sgy = dy > 0 ? 1.0f : dy < 0 ? -1.0f : 0.0f;
+        const float rr = (sgx != 0 && sgy != 0) ? RD : RO;
+        const float tx = sgx * rr, ty = sgy * rr;
+        for (int i = 0; i < 9; i++) {
+            float ix = (float)(i % 3 - 1), iy = (float)(i / 3 - 1), r = (ix != 0 && iy != 0) ? RD : RO;
+            float mx = ix * r, my = iy * r;
+            bool on = moved && ix == sgx && iy == sgy;
+            dl->AddCircleFilled(P(125 + mx, 135 + my), (on ? 6.5f : i == 4 ? 3.0f : 4.5f) * k, gate_c, 16);
+        }
+        // ball position: slides quickly to the target (frame-rate independent)
+        static float bx, by;
+        struct TrailPt { float x, y; double t; };
+        static TrailPt trail[96]; static int trail_n, trail_head;
+        const double now = ImGui::GetTime();
+        float dt = ImGui::GetIO().DeltaTime; if (dt > 0.1f) dt = 0.1f;
+        const float f = 1.0f - expf(-dt * 38.0f);
+        bx += (tx - bx) * f; by += (ty - by) * f;
+        if (fabsf(tx - bx) < 0.3f) bx = tx;
+        if (fabsf(ty - by) < 0.3f) by = ty;
+        trail[trail_head] = { bx, by, now }; trail_head = (trail_head + 1) % 96; if (trail_n < 96) trail_n++;
+        // trail: newest -> oldest, thinner and fainter with age
+        const double LIFE = 0.28;
+        const ImVec4 tc(1.0f, 0.18f, 0.32f, 1.0f);   // red-pink light
+        for (int pass = 0; pass < 2; pass++) {       // 0 = soft glow, 1 = core
+            for (int i = 0; i + 1 < trail_n; i++) {
+                const TrailPt &p0 = trail[(trail_head - 1 - i + 192) % 96], &p1 = trail[(trail_head - 2 - i + 192) % 96];
+                double age = now - p1.t;
+                if (age > LIFE) break;
+                if (p0.x == p1.x && p0.y == p1.y) continue;
+                float life = 1.0f - (float)(age / LIFE);
+                float wdt = (pass ? 4.0f + 9.0f * life : 10.0f + 16.0f * life) * k;
+                float al = a * life * (pass ? 0.95f : 0.25f);
+                ImU32 c = ImGui::GetColorU32(ImVec4(tc.x, tc.y + 0.25f * (1 - life), tc.z + 0.35f * (1 - life), al));
+                dl->AddLine(P(125 + p0.x, 135 + p0.y), P(125 + p1.x, 135 + p1.y), c, wdt);
+                if (pass) dl->AddCircleFilled(P(125 + p1.x, 135 + p1.y), wdt * 0.5f, c, 12);   // round joints (core only: on the glow they'd stack up)
+            }
+        }
+        // the ball
+        ImVec2 ball = P(125 + bx, 135 + by);
+        dl->AddCircleFilled(ball, 30 * k, ImGui::GetColorU32(ImVec4(1.0f, 0.2f, 0.25f, a * (moved ? 0.30f : 0.15f))), 32);
+        dl->AddCircleFilled(ball, 22 * k, ImGui::GetColorU32(ImVec4(0.86f, 0.10f, 0.12f, a)), 32);
+        dl->AddCircleFilled(ImVec2(ball.x - 3 * k, ball.y - 3 * k), 17 * k, ImGui::GetColorU32(ImVec4(1.0f, 0.30f, 0.26f, a)), 32);
+        dl->AddCircleFilled(ImVec2(ball.x - 8 * k, ball.y - 9 * k), 6.5f * k, ImGui::GetColorU32(ImVec4(1, 1, 1, a * 0.55f)), 16);   // shine
 
-        // 8 buttons, Vewlix curve
+        // 8 buttons, Vewlix curve: each one has its colour, dim at rest and lit with a glow when pressed
         const bool num = cfg.pad_labels == 0;
-        struct Btn { float x, y; DWORD bit; const char *xb; const char *nb; };
+        struct Btn { float x, y; DWORD bit; const char *xb; const char *nb; float r, g, b; };
         const Btn btns[] = {
-            {270, 108, 0x4000, "X", "X"}, {342, 92, 0x8000, "Y", "Y"}, {414, 92, 0x0200, "RB", "R1"}, {486, 100, 0x0100, "LB", "L1"},
-            {270, 186, 0x1000, "A", "A"}, {342, 170, 0x2000, "B", "B"}, {414, 170, 0x20000, "RT", "R2"}, {486, 178, 0x10000, "LT", "L2"} };
+            {270, 108, 0x4000, "X", "X", 1.00f, 0.42f, 0.66f}, {342, 92, 0x8000, "Y", "Y", 0.33f, 0.62f, 1.00f},
+            {414, 92, 0x0200, "RB", "R1", 0.30f, 0.86f, 0.46f}, {486, 100, 0x0100, "LB", "L1", 1.00f, 0.36f, 0.32f},
+            {270, 186, 0x1000, "A", "A", 1.00f, 0.62f, 0.20f}, {342, 170, 0x2000, "B", "B", 0.72f, 0.48f, 1.00f},
+            {414, 170, 0x20000, "RT", "R2", 0.25f, 0.84f, 0.90f}, {486, 178, 0x10000, "LT", "L2", 0.85f, 0.85f, 0.88f} };
         const DWORD bits = b | (g->bLeftTrigger > 60 ? 0x10000u : 0) | (g->bRightTrigger > 60 ? 0x20000u : 0);
         for (const Btn &bt : btns) {
             bool on = bits & bt.bit;
-            dl->AddCircleFilled(P(bt.x, bt.y), 31 * k, rim_c, 36);
-            dl->AddCircleFilled(P(bt.x, bt.y), 26 * k, on ? on_c : idle_c, 36);
-            label(P(bt.x, bt.y), num ? bt.nb : bt.xb, 22, on ? dark_c : text_c);
+            ImVec2 c = P(bt.x, bt.y);
+            if (on) dl->AddCircleFilled(c, 36 * k, ImGui::GetColorU32(ImVec4(bt.r, bt.g, bt.b, a * 0.28f)), 40);   // glow
+            dl->AddCircleFilled(c, 27 * k, on ? ImGui::GetColorU32(ImVec4(bt.r, bt.g, bt.b, a))
+                                              : ImGui::GetColorU32(ImVec4(bt.r * 0.22f, bt.g * 0.22f, bt.b * 0.22f, a * 0.9f)), 40);
+            dl->AddCircle(c, 27 * k, ImGui::GetColorU32(ImVec4(bt.r, bt.g, bt.b, a * (on ? 1.0f : 0.55f))), 40, 2.5f * k);
+            label(c, num ? bt.nb : bt.xb, 22, on ? dark_c : ImGui::GetColorU32(ImVec4(bt.r * 0.5f + 0.5f, bt.g * 0.5f + 0.5f, bt.b * 0.5f + 0.5f, a)));
         }
         // back / start
         auto small = [&](float x, const char *t, bool on) {
@@ -792,6 +858,8 @@ static void draw_arcade_overlay(UINT w, UINT h, const XINPUT_GAMEPAD_ *g) {
 
 static void draw_pad_overlay(UINT w, UINT h) {
     const XINPUT_GAMEPAD_ *g = NULL;
+    static int test_frames; test_frames++;
+    if (test_pad_set && test_pad_switch >= 0 && test_frames >= test_pad_switch) test_pad.wButtons = test_pad_b2;
     if (test_pad_set) g = &test_pad;
     else if (active_pad >= 0) g = &pad_state[active_pad].Gamepad;
     if (!g && !menu_open) return;   // no controller: nothing to show in game
