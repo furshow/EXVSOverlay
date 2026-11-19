@@ -40,25 +40,28 @@ static PHidP_GetSpecificValueCaps rHidP_GetSpecificValueCaps;
 static volatile LONG g_blocked_calls;   // diagnostics: calls answered "idle"
 static volatile LONG g_last_state = -1; // last blocked state seen by a hook (for the log)
 
-static bool blocked(void) {
-    bool b = menu_game_input_blocked();
-    LONG s = b ? 1 : 0;
-    if (InterlockedExchange(&g_last_state, s) != s && g_last_state >= 0)
-        ov_log("input: game %s keyboard/controller input", b ? "ignores" : "receives");
+static bool count_blocked(bool b, LONG kind) {   // kind 0 keyboard, 1 controller (for the log)
+    LONG s = (b ? 1 : 0) | (kind << 1);
+    LONG prev = InterlockedExchange(&g_last_state, s);
+    if (prev != s && prev >= 0 && (prev >> 1) == kind)
+        ov_log("input: game %s %s input", b ? "ignores" : "receives", kind ? "controller" : "keyboard");
     if (b) InterlockedIncrement(&g_blocked_calls);
     return b;
 }
+static bool kb_blocked(void) { return count_blocked(menu_keyboard_blocked(), 0); }
+static bool pad_blocked(void) { return count_blocked(menu_pad_blocked(), 1); }
 
 // ---- keyboard -------------------------------------------------------------------------------
 static SHORT WINAPI h_GetAsyncKeyState(int vk) {
     SHORT r = rGetAsyncKeyState(vk);   // always called: it also resets the "pressed since last call" bit
-    return blocked() ? 0 : r;
+    if (split_virtual_key(vk)) return (SHORT)0x8001;   // splitscreen: card / coin button of this copy's pad
+    return kb_blocked() ? 0 : r;
 }
 
 // ---- raw input: keyboard / mouse events become releases ---------------------------------------
 static UINT WINAPI h_GetRawInputData(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT hdr) {
     UINT r = rGetRawInputData(h, cmd, data, size, hdr);
-    if (cmd != RID_INPUT || !data || r == (UINT)-1 || r < sizeof(RAWINPUTHEADER) || !blocked()) return r;
+    if (cmd != RID_INPUT || !data || r == (UINT)-1 || r < sizeof(RAWINPUTHEADER) || !kb_blocked()) return r;
     RAWINPUT *ri = (RAWINPUT *)data;
     if (ri->header.dwType == RIM_TYPEKEYBOARD && r >= sizeof(RAWINPUTHEADER) + sizeof(RAWKEYBOARD)) {
         ri->data.keyboard.Flags |= RI_KEY_BREAK;
@@ -163,7 +166,7 @@ bool focus_hid_pad(XINPUT_GAMEPAD_ *g) {
 static NTSTATUS_ WINAPI h_HidP_GetUsages(int type, USHORT page, USHORT link, USHORT *list, ULONG *len, void *pp, char *rep, ULONG rlen) {
     NTSTATUS_ st = rHidP_GetUsages(type, page, link, list, len, pp, rep, rlen);
     if (st == HIDP_STATUS_SUCCESS_ && len && list && type == 0 /*HidP_Input*/ && page == 0x09) hid_record_buttons(pp, list, *len);
-    if (st == HIDP_STATUS_SUCCESS_ && len && blocked()) *len = 0;   // no button pressed
+    if (st == HIDP_STATUS_SUCCESS_ && len && pad_blocked()) *len = 0;   // no button pressed
     return st;
 }
 
@@ -214,9 +217,27 @@ static NTSTATUS_ WINAPI h_HidP_GetUsageValue(int type, USHORT page, USHORT link,
     NTSTATUS_ st = rHidP_GetUsageValue(type, page, link, usage, value, pp, rep, rlen);
     if (st != HIDP_STATUS_SUCCESS_ || !value) return st;
     if (type == 0 /*HidP_Input*/) hid_record_value(type, page, link, usage, *value, pp);
-    if (!blocked()) { remember_value(pp, page, link, usage, *value); return st; }
+    if (!pad_blocked()) { remember_value(pp, page, link, usage, *value); return st; }
     ULONG v; if (neutral_value(pp, type, page, link, usage, &v)) *value = v;
     return st;
+}
+
+// ---- splitscreen: raw input also while another copy has the focus ------------------------------
+// Windows only sends raw input (DirectInput-mode pads, keyboard) to the focused window unless the
+// device is registered with RIDEV_INPUTSINK. In splitscreen the loader's registrations get that flag.
+typedef BOOL (WINAPI *PRegisterRawInputDevices)(PCRAWINPUTDEVICE, UINT, UINT);
+static PRegisterRawInputDevices rRegisterRawInputDevices;
+static BOOL WINAPI h_RegisterRawInputDevices(PCRAWINPUTDEVICE devs, UINT n, UINT size) {
+    if (!split_active() || !devs || n == 0 || n > 64 || size != sizeof(RAWINPUTDEVICE)) return rRegisterRawInputDevices(devs, n, size);
+    RAWINPUTDEVICE copy[64]; int sinks = 0;
+    for (UINT i = 0; i < n; i++) {
+        copy[i] = devs[i];
+        if (copy[i].hwndTarget && !(copy[i].dwFlags & (RIDEV_REMOVE | RIDEV_EXINPUTSINK))) { copy[i].dwFlags |= RIDEV_INPUTSINK; sinks++; }
+    }
+    BOOL ok = rRegisterRawInputDevices(copy, n, size);
+    if (!ok && sinks) return rRegisterRawInputDevices(devs, n, size);   // as asked, if the flag is refused
+    if (sinks) ov_log("splitscreen: %d raw input device(s) registered for background input", sinks);
+    return ok;
 }
 
 // ---- IAT patching -------------------------------------------------------------------------------
@@ -226,6 +247,7 @@ static const Patch PATCHES[] = {
     { "user32.dll", "GetRawInputData", (void *)h_GetRawInputData, (void **)&rGetRawInputData },
     { "hid.dll", "HidP_GetUsages", (void *)h_HidP_GetUsages, (void **)&rHidP_GetUsages },
     { "hid.dll", "HidP_GetUsageValue", (void *)h_HidP_GetUsageValue, (void **)&rHidP_GetUsageValue },
+    { "user32.dll", "RegisterRawInputDevices", (void *)h_RegisterRawInputDevices, (void **)&rRegisterRawInputDevices },
 };
 
 // Points every import of `mod` that matches PATCHES at our hook. Returns how many were patched.

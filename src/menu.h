@@ -44,7 +44,20 @@ void focus_init(void);
 long focus_blocked_calls(void);
 bool focus_hid_pad(XINPUT_GAMEPAD_ *g);   // latest DirectInput (HID) pad the loader read, as an Xbox pad
 
+// split.cpp (splitscreen: one of several copies of the game started by the EXVS Launcher)
+void split_init(void);            // reads [split] from this copy's config.ini (done on first use)
+int split_log_player(void);       // player number for the log prefix (0 until loaded)
+const char *ov_cfg_dir(void);     // folder of this copy's config.ini / card.ini (the exe folder unless split)
+bool split_active(void);
+int split_player(void);           // 1..4, 0 = not split
+int split_pad(void);              // XInput slot this copy reads, -1 = none
+bool split_keyboard(void);        // the keyboard reaches this copy
+bool split_virtual_key(int vk);   // card / coin key held by the overlay for this copy only
+void split_set_virtual_key(int vk, bool down);
+
 // menu.cpp
+bool menu_keyboard_blocked(void);   // keyboard / mouse: menu open, not focused (option), or not this split player's
+bool menu_pad_blocked(void);        // controllers: menu open, or not focused (option; never in splitscreen)
 bool menu_auto_update(void);
 int menu_upscale_mode(void);        // 0 off, 1 FSR 1
 float menu_upscale_sharpness(void);  // 0..1 (RCAS strength)

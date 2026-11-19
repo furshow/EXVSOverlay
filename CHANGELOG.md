@@ -3,6 +3,17 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [Unreleased]
+### Splitscreen (EXVS Launcher)
+- When the game is started for one player of a splitscreen session (a `[split]` section in that player's
+  `config.ini`), the copy only sees its own Xbox / XInput controller, as controller 1. The keyboard only
+  reaches the keyboard player's copy, and controllers keep working while another copy has the focus.
+- The card / coin buttons on a controller press the key for that copy only.
+- The window isn't resized by the overlay there (the launcher tiles the windows), and only player 1's copy
+  checks for updates. Log lines start with the player (`[P2]`).
+- The overlay reads `config.ini` from the folder the game was started with (`vsac29_Release.exe "<folder>"`),
+  like the loader does.
+
 ## [1.0.1] - 2026-11-14
 ### Controllers
 - DirectInput controllers (arcade sticks in PS3/PS4 mode, e.g. Hori Fighting Stick Mini 4) now show in the
