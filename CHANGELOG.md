@@ -3,7 +3,7 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
-## [Unreleased]
+## [1.1.0] - 2026-11-19
 ### Splitscreen (EXVS Launcher)
 - When the game is started for one player of a splitscreen session (a `[split]` section in that player's
   `config.ini`), the copy only sees its own Xbox / XInput controller, as controller 1. The keyboard only
