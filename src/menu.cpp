@@ -242,10 +242,22 @@ bool menu_game_input_blocked(void) {
     return !focused;
 }
 
+// Splitscreen: only one copy can have the focus, so the focus doesn't matter there. Each copy reads
+// its own controller all the time, and the keyboard belongs to one player.
+bool menu_keyboard_blocked(void) {
+    if (split_active()) return (menu_open && cfg.block_input) || !split_keyboard();
+    return menu_game_input_blocked();
+}
+bool menu_pad_blocked(void) {
+    if (split_active()) return menu_open && cfg.block_input;
+    return menu_game_input_blocked();
+}
+
 static void poll_pads(void) {
     DWORD now = GetTickCount();
     active_pad = -1;
     for (int i = 0; i < 4; i++) {
+        if (split_active() && i != split_pad()) { pad_connected[i] = false; continue; }   // another player's pad
         if (!pad_connected[i] && (int)(now - pad_retry_at[i]) < 0) continue;
         XINPUT_STATE_ s;
         if (ov_real_xinput_get_state(i, &s) == ERROR_SUCCESS) {
@@ -256,7 +268,8 @@ static void poll_pads(void) {
             memset(&pad_state[i], 0, sizeof(pad_state[i]));
         }
     }
-    pad_connected[HID_PAD] = focus_hid_pad(&pad_state[HID_PAD].Gamepad);
+    // the DirectInput pad the loader reads (in splitscreen, the one in this copy's config.ini)
+    pad_connected[HID_PAD] = (!split_active() || split_pad() < 0) && focus_hid_pad(&pad_state[HID_PAD].Gamepad);
     if (active_pad < 0 && pad_connected[HID_PAD]) active_pad = HID_PAD;
 }
 
@@ -360,7 +373,7 @@ static int arcade_vk(int slot) {
     int &vk = arcade_vk_cache[slot];
     if (vk) return vk;
     char cfgp[MAX_PATH], v[32];
-    snprintf(cfgp, sizeof(cfgp), "%sconfig.ini", ov_dir());
+    snprintf(cfgp, sizeof(cfgp), "%sconfig.ini", ov_cfg_dir());
     GetPrivateProfileStringA("keyboard", ARCADE[slot].cfg_key, ARCADE[slot].default_key, v, sizeof(v), cfgp);
     char *s = v; while (*s == ' ' || *s == '\t') s++;
     char *e = s + strlen(s); while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == ',')) *--e = 0;
@@ -404,17 +417,19 @@ static void card_tick(bool focus) {
 
     for (int s = 0; s < ARCADE_COUNT; s++) {
         int btn = cfg.arcade_button[s];
-        bool held = btn && (all & (DWORD)btn) && focus && !menu_open;
+        // splitscreen: a real key press would reach every copy, so the key is held for this copy only
+        bool held = btn && (all & (DWORD)btn) && (focus || split_active()) && !menu_open;
         if (held != arcade_key_down[s]) {
             arcade_key_down[s] = held;
-            send_key(arcade_vk(s), held);
+            if (split_active()) split_set_virtual_key(arcade_vk(s), held);
+            else send_key(arcade_vk(s), held);
             if (held) ov_log("%s button pressed -> key 0x%02X", ARCADE[s].name, arcade_vk(s));
         }
     }
 }
 
 void menu_filter_gamepad(XINPUT_GAMEPAD_ *g) {
-    if (menu_game_input_blocked()) { memset(g, 0, sizeof(*g)); return; }   // menu open / game not focused
+    if (menu_pad_blocked()) { memset(g, 0, sizeof(*g)); return; }   // menu open / game not focused
     if (!cfg.card_hide) return;
     for (int s = 0; s < ARCADE_COUNT; s++) {
         int btn = cfg.arcade_button[s];
@@ -1001,7 +1016,7 @@ static void res_reload(void) {
         char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH);
         const char *name = strrchr(exe, '\\'); name = name ? name + 1 : exe;
         res_is_lm = strstr(name, "_LM") != NULL;
-        snprintf(res_cfg_path, sizeof(res_cfg_path), "%s%s", ov_dir(), res_is_lm ? "lmnfig.ini" : "config.ini");
+        snprintf(res_cfg_path, sizeof(res_cfg_path), "%s%s", res_is_lm ? ov_dir() : ov_cfg_dir(), res_is_lm ? "lmnfig.ini" : "config.ini");
         snprintf(res_launcher_path, sizeof(res_launcher_path), "%sSnowLauncher.ini", ov_dir());
     }
     char v[32];
@@ -1119,7 +1134,7 @@ static void log_window(HWND hwnd, const char *when) {
 
 static void restarted_window_check(void) {
     static DWORD first_tick, next_check; static int wrong_count, fixes; static bool loaded, forced;
-    if (!cfg.keep_window) return;
+    if (!cfg.keep_window || split_active()) return;   // splitscreen: the launcher places the windows
     HWND hwnd = ov_game_hwnd();
     DWORD now = GetTickCount();
     if (!hwnd) return;

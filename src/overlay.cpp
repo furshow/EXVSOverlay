@@ -38,6 +38,7 @@ void ov_log(const char *fmt, ...) {
     if (f) {
         SYSTEMTIME t; GetLocalTime(&t);
         fprintf(f, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+        if (split_log_player()) fprintf(f, "[P%d] ", split_log_player());   // splitscreen: every copy writes here
         va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
         fputc('\n', f); fclose(f);
     }
@@ -76,15 +77,23 @@ DWORD ov_real_xinput_get_state(DWORD i, XINPUT_STATE_ *s) {
 }
 
 extern "C" {
+// Splitscreen: this copy only has its player's controller, as controller 1.
+static bool split_slot(DWORD *i) {
+    if (!split_active()) return true;
+    if (*i != 0 || split_pad() < 0) return false;
+    *i = (DWORD)split_pad();
+    return true;
+}
 __declspec(dllexport) DWORD WINAPI XInputGetState(DWORD i, XINPUT_STATE_ *s) {
+    if (!split_slot(&i)) return ERROR_DEVICE_NOT_CONNECTED;
     DWORD r = ov_real_xinput_get_state(i, s);
     // While the menu is open the game sees an idle controller; the card button can be hidden too.
     if (r == ERROR_SUCCESS && s) menu_filter_gamepad(&s->Gamepad);
     return r;
 }
-__declspec(dllexport) DWORD WINAPI XInputSetState(DWORD i, void *s) { ensure_xinput(); return rSetState ? rSetState(i, s) : ERROR_DEVICE_NOT_CONNECTED; }
-__declspec(dllexport) DWORD WINAPI XInputGetCapabilities(DWORD i, DWORD f, void *c) { ensure_xinput(); return rGetCaps ? rGetCaps(i, f, c) : ERROR_DEVICE_NOT_CONNECTED; }
-__declspec(dllexport) DWORD WINAPI XInputGetDSoundAudioDeviceGuids(DWORD i, GUID *a, GUID *b) { ensure_xinput(); return rGetGuids ? rGetGuids(i, a, b) : ERROR_DEVICE_NOT_CONNECTED; }
+__declspec(dllexport) DWORD WINAPI XInputSetState(DWORD i, void *s) { if (!split_slot(&i)) return ERROR_DEVICE_NOT_CONNECTED; ensure_xinput(); return rSetState ? rSetState(i, s) : ERROR_DEVICE_NOT_CONNECTED; }
+__declspec(dllexport) DWORD WINAPI XInputGetCapabilities(DWORD i, DWORD f, void *c) { if (!split_slot(&i)) return ERROR_DEVICE_NOT_CONNECTED; ensure_xinput(); return rGetCaps ? rGetCaps(i, f, c) : ERROR_DEVICE_NOT_CONNECTED; }
+__declspec(dllexport) DWORD WINAPI XInputGetDSoundAudioDeviceGuids(DWORD i, GUID *a, GUID *b) { if (!split_slot(&i)) return ERROR_DEVICE_NOT_CONNECTED; ensure_xinput(); return rGetGuids ? rGetGuids(i, a, b) : ERROR_DEVICE_NOT_CONNECTED; }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -609,10 +618,12 @@ static bool install_hooks(void) {
 
 static DWORD WINAPI init_thread(LPVOID) {
     // an update while the game was running leaves the previous DLL renamed to xinput9_1_0.old.dll
+    split_init();   // splitscreen settings of this copy (logs which player it is)
     char old[MAX_PATH]; snprintf(old, sizeof(old), "%sxinput9_1_0.old.dll", g_dir);
     if (DeleteFileA(old)) ov_log("removed leftover %s", old);
     menu_load_config();
-    upd_startup(menu_enabled() && menu_auto_update());
+    // splitscreen: only player 1's copy looks for updates (the others would download the same one)
+    upd_startup(menu_enabled() && menu_auto_update() && split_player() <= 1);
     if (!menu_enabled()) { ov_log("overlay disabled in EXVSOverlay.ini (enabled=0)"); return 0; }
     focus_init();                         // keyboard / controller while the game isn't focused
     if (menu_hud_enabled()) hud_init();   // hide-HUD detours: early, before the game draws any HUD
@@ -639,6 +650,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
         GetModuleFileNameA(NULL, g_dir, MAX_PATH);
         char *s = strrchr(g_dir, '\\'); if (s) s[1] = 0;
         ov_log("---- EXVS Overlay %s loaded into %s (pid %lu)", OVERLAY_VERSION, exe, GetCurrentProcessId());
+
         HANDLE t = CreateThread(NULL, 0, init_thread, NULL, 0, NULL);
         if (t) CloseHandle(t);
     }
