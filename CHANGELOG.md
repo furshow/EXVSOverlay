@@ -5,6 +5,13 @@ section of the released version as the release notes.
 
 ## [Unreleased]
 ### Custom Training
+- **Any layout up to 4 units**: 1v1, 1v2, 2v1, 1v3, 2v2 and 3v1, from the launcher's per-CPU teams (`Team2..4` /
+  `On2..4` in `Training\training.ini`; the old `Partner` key still works). The launcher's slots go into the bridge's
+  4 positions with your CPUs first and the enemies after, so a 2v2 is the bridge's own; for the others the bridge
+  runs its 2v2 and the overlay moves positions to the other team or takes them out after the bridge's setup and
+  again before every rematch. The result screen gets made-up rows for positions taken out (on the team that has
+  fewer than 2), and its 2-per-team check is off for those layouts. 1v2 / 1v3 without team cost keep the game's
+  own training.
 - **1v3 with team cost** now has the **result screen** and the **automatic rematch**, staying 1v3:
   - the bridge's result data wanted 2 players per team and gave up with 1 vs 3 (no result screen, back to the
     menu). In 1v3 those two checks are turned off in the loaded bridge (memory only, the file stays unmodified)

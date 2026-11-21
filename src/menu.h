@@ -2,7 +2,7 @@
 #pragma once
 #include <windows.h>
 
-#define OVERLAY_VERSION "1.2.0"
+#define OVERLAY_VERSION "1.2.1"
 #define OVERLAY_WIDEN2_(x) L##x
 #define OVERLAY_WIDEN_(x) OVERLAY_WIDEN2_(x)
 #define OVERLAY_VERSION_W OVERLAY_WIDEN_(OVERLAY_VERSION)

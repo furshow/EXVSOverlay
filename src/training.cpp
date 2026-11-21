@@ -36,8 +36,12 @@ enum : DWORD {
 
 struct Config {
     bool enabled, random_stage, consume_cost;
-    int partner;   // 1 ally = 2v2 (bridge), 0 off = 1v2, 2 enemy = 1v3 (no bridge, see "solo" below)
-    int seq, unit[4], level[4], ex[4];
+    // 1 = 2v2 (bridge), 0 = 1v2 and 2 = 1v3 (without team cost: the game's own training, see "solo" below),
+    // 3 = any other layout (1v1, 2v1, 3v1: the bridge's 2v2 rearranged, see "layouts" below)
+    int partner;
+    int layout[4];          // per bridge position (0 = you): 0 your team, 1 enemy team, -1 taken out
+    int allies, enemies;    // CPUs on your team / on the enemy team
+    int seq, unit[4], level[4], ex[4];   // per bridge position (read_config puts the launcher's slots there)
     int pool[B_POOL_MAX], npool;
     int slot_pool[4][256], nslot[4];   // random by category (unit <= -2): the overlay draws one per match
 };
@@ -276,13 +280,47 @@ static void disable(void) {
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 static int cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 
+// The launcher's slots (you + 3 CPUs, each on a team or out) in the bridge's 4 positions, whose teams it always
+// makes 0, 0, 1, 1: you at 0, your CPUs at 1 then 2, the enemies at 2 then 3 then 1, the CPUs that are out in the
+// positions left (the bridge still needs a unit there). So a 2v2 needs no change, 1v3 moves position 1 to the
+// enemy team, 3v1 moves position 2 to yours, and 1v2 / 2v1 / 1v1 take positions out (see "layouts" below).
+static void arrange(Config *c, const int team[4], const int on[4]) {
+    int slot_at[4] = { 0, -1, -1, -1 }, a = 0, e = 0;
+    static const int ALLY_POS[2] = { 1, 2 }, ENEMY_POS[3] = { 2, 3, 1 };
+    for (int i = 1; i < 4; i++) if (on[i] && !team[i] && a < 2) slot_at[ALLY_POS[a++]] = i;
+    for (int i = 1; i < 4; i++) {
+        if (!on[i] || !team[i]) continue;
+        for (int p : ENEMY_POS) if (slot_at[p] < 0) { slot_at[p] = i; e++; break; }
+    }
+    if (!e) {   // no enemy (shouldn't happen, the launcher keeps one): the plain 2v2
+        for (int p = 0; p < 4; p++) slot_at[p] = p;
+        a = 1; e = 2;
+    }
+    for (int p = 1, i = 1; p < 4; p++) {   // the CPUs that are out, in the positions left
+        if (slot_at[p] >= 0) continue;
+        while (i < 4 && [&] { for (int q = 0; q < 4; q++) if (slot_at[q] == i) return true; return false; }()) i++;
+        slot_at[p] = i < 4 ? i++ : 1;
+        c->layout[p] = -1;
+    }
+    for (int p = 1; p < 4; p++)
+        if (c->layout[p] != -1) c->layout[p] = team[slot_at[p]];
+    Config o = *c;
+    for (int p = 0; p < 4; p++) {
+        int i = slot_at[p];
+        c->unit[p] = o.unit[i]; c->level[p] = o.level[i]; c->ex[p] = o.ex[i];
+        c->nslot[p] = o.nslot[i]; memcpy(c->slot_pool[p], o.slot_pool[i], sizeof(c->slot_pool[p]));
+    }
+    c->allies = a; c->enemies = e;
+    bool plain = a == 1 && e == 2;   // positions 1 / 2 / 3 = ally / enemy / enemy: the bridge's own 2v2
+    c->partner = plain ? 1 : a == 0 && e == 2 ? 0 : a == 0 && e == 3 ? 2 : 3;
+}
+
 static bool read_config(const char *ini, Config *c) {
     memset(c, 0, sizeof(*c));
     c->enabled = GetPrivateProfileIntA("Training", "Enabled", 0, ini) != 0;
     c->seq = GetPrivateProfileIntA("Training", "Seq", 0, ini);
     c->random_stage = GetPrivateProfileIntA("Training", "RandomStage", 0, ini) != 0;
     c->consume_cost = GetPrivateProfileIntA("Training", "ConsumeCost", 1, ini) != 0;
-    c->partner = clampi(GetPrivateProfileIntA("Training", "Partner", 1, ini), 0, 2);
     char k[16], v[32];
     for (int i = 0; i < 4; i++) {
         snprintf(k, sizeof(k), "Unit%d", i + 1); GetPrivateProfileStringA("Training", k, "-1", v, sizeof(v), ini); c->unit[i] = atoi(v);
@@ -316,6 +354,21 @@ static bool read_config(const char *ini, Config *c) {
     int w = 0;
     for (int i = 0; i < c->npool; i++) if (!w || c->pool[w - 1] != c->pool[i]) c->pool[w++] = c->pool[i];
     c->npool = w;
+
+    // teams: Team<n> (0 yours, 1 enemy) and On<n> for the CPU slots 2-4 (launcher 1.3.1+); older settings only
+    // have Partner (1 ally, 0 off, 2 enemy) for slot 2, with slots 3 and 4 the enemies
+    int team[4] = { 0, 0, 1, 1 }, on[4] = { 1, 1, 1, 1 };
+    char probe[8];
+    if (GetPrivateProfileStringA("Training", "Team2", "", probe, sizeof(probe), ini)) {
+        for (int i = 1; i < 4; i++) {
+            snprintf(k, sizeof(k), "Team%d", i + 1); team[i] = GetPrivateProfileIntA("Training", k, i == 1 ? 0 : 1, ini) ? 1 : 0;
+            snprintf(k, sizeof(k), "On%d", i + 1); on[i] = GetPrivateProfileIntA("Training", k, 1, ini) ? 1 : 0;
+        }
+    } else {
+        int pm = clampi(GetPrivateProfileIntA("Training", "Partner", 1, ini), 0, 2);
+        on[1] = pm != 0; team[1] = pm == 2;
+    }
+    arrange(c, team, on);
     return true;
 }
 
@@ -616,27 +669,50 @@ static void watch_1v2(void) {
 static BuilderFn g_chain_next;
 static BYTE *g_chain_page;
 static bool g_chain_hooked;
-static volatile LONG g_flip_partner, g_flips;   // g_flip_partner: 1 = move the partner (1v3), 2 = take it out (1v2)
+static volatile LONG g_flip_partner, g_flips;   // g_flip_partner: a layout other than the bridge's 2v2 is on
 static volatile LONG64 g_flip_obj;   // training object of the running 1v3
 
-// partner = the bridge's member 1 (the slot after the player's); quiet when it's already on the enemy team
-static bool flip_partner(BYTE *obj, bool quiet) {
-    if (*(DWORD *)(obj + O_UNIT_COUNT) != 4) return false;
+// ---- layouts: the bridge's 2v2 rearranged -------------------------------------------------------------------
+// g_layout = the setup's layout per bridge position (0 you, 1-3 the bridge's members in order: it fills the
+// player's slot, then the other slots in order). After the bridge filled the slots (and again before every
+// rematch, which puts them back to 0, 0, 1, 1), each position goes to its team or out: the slots that stay move
+// down and the unit count drops to what's left.
+static volatile LONG g_layout[4], g_layout_out;   // g_layout_out: positions taken out (1v2, 2v1: 1; 1v1: 2)
+static bool apply_layout(BYTE *obj) {
+    if (*(DWORD *)(obj + O_UNIT_COUNT) != 4) return false;   // already applied (or not the bridge's 4)
     int human = -1;
     for (int i = 0; i < 4; i++) if (obj[SLOT0 + i * SLOT_SIZE]) { if (human >= 0) return false; human = i; }
     if (human < 0) return false;
     DWORD pt = *(DWORD *)(obj + SLOT0 + human * SLOT_SIZE + 0x160);
     if (pt > 1) return false;
-    for (int i = 0; i < 4; i++) {   // the bridge fills the player, then the other slots in order: the first one is the partner
+    bool out[4] = {}, changed = false;
+    for (int i = 0, p = 1; i < 4; i++) {
         if (i == human) continue;
-        BYTE *sl = obj + SLOT0 + i * SLOT_SIZE;
-        if (*(DWORD *)(sl + 0x160) != pt) { if (!quiet) ov_log("training: 1v3: the partner slot isn't on your team, left as it is"); return false; }
-        *(DWORD *)(sl + 0x160) = 1 ^ pt;
-        InterlockedIncrement(&g_flips);
-        ov_log("training: 1v3 with team cost: partner (%lu) moved to the enemy team", *(DWORD *)(sl + 0x164));
-        return true;
+        int want = g_layout[p++];
+        DWORD *team = (DWORD *)(obj + SLOT0 + i * SLOT_SIZE + 0x160);
+        if (want < 0) { out[i] = true; changed = true; continue; }
+        DWORD t = want ? 1 ^ pt : pt;
+        if (*team != t) { *team = t; changed = true; }
     }
-    return false;
+    if (!changed) return false;
+    int n = 0;
+    for (int i = 0; i < 4; i++) {   // the slots that stay move down, each with its slot index field
+        if (out[i]) continue;
+        BYTE *dst = obj + SLOT0 + n * SLOT_SIZE;
+        if (n != i) memcpy(dst, obj + SLOT0 + i * SLOT_SIZE, SLOT_SIZE);
+        *(DWORD *)(dst + 0x158) = (DWORD)n;
+        n++;
+    }
+    *(DWORD *)(obj + O_UNIT_COUNT) = (DWORD)n;
+    InterlockedIncrement(&g_flips);
+    int mine = 0;
+    for (int i = 0; i < n; i++) mine += *(DWORD *)(obj + SLOT0 + i * SLOT_SIZE + 0x160) == pt;
+    ov_log("training: %dv%d: units %lu %lu %lu %lu, teams %lu %lu %lu %lu (count %d)", mine, n - mine,
+               *(DWORD *)(obj + SLOT0 + 0x164), n > 1 ? *(DWORD *)(obj + SLOT0 + SLOT_SIZE + 0x164) : 0,
+               n > 2 ? *(DWORD *)(obj + SLOT0 + 2 * SLOT_SIZE + 0x164) : 0, n > 3 ? *(DWORD *)(obj + SLOT0 + 3 * SLOT_SIZE + 0x164) : 0,
+               *(DWORD *)(obj + SLOT0 + 0x160), n > 1 ? *(DWORD *)(obj + SLOT0 + SLOT_SIZE + 0x160) : 9,
+               n > 2 ? *(DWORD *)(obj + SLOT0 + 2 * SLOT_SIZE + 0x160) : 9, n > 3 ? *(DWORD *)(obj + SLOT0 + 3 * SLOT_SIZE + 0x160) : 9, n);
+    return true;
 }
 
 // When a match ends: what the bridge's rematch looks at (its exit hook, bridge fn 0x42E0, only rematches when the
@@ -649,38 +725,14 @@ static void log_owner_after_match(void) {
     if (!ReadProcessMemory(GetCurrentProcess(), (void *)(ULONG_PTR)obj, buf, sizeof(buf), &got) || got != sizeof(buf) ||
         *(ULONG64 *)buf != (ULONG64)(base + RVA_OWNER_VTABLE)) { ov_log("training: 1v3: the training object is gone after the match"); return; }
     ULONG64 st = *(ULONG64 *)(buf + 0x468);
-    ov_log("training: %s match over: state fn %s0x%llX, flags 12FC-1300 = %u %u %u %u %u", g_flip_partner == 2 ? "1v2" : "1v3", st >= (ULONG64)base ? "RVA " : "",
+    ov_log("training: custom match over: state fn %s0x%llX, flags 12FC-1300 = %u %u %u %u %u", st >= (ULONG64)base ? "RVA " : "",
            st >= (ULONG64)base ? st - (ULONG64)base : st, buf[0x12fc], buf[0x12fd], buf[0x12fe], buf[0x12ff], buf[0x1300]);
-}
-
-// 1v2: the partner slot out of the bridge's 4 (the first slot after the player's that's on the player's team)
-static bool drop_partner(BYTE *obj) {
-    if (*(DWORD *)(obj + O_UNIT_COUNT) != 4) { ov_log("training: 1v2: the bridge didn't make 4 units, left as it is"); return false; }
-    int human = -1;
-    for (int i = 0; i < 4; i++) if (obj[SLOT0 + i * SLOT_SIZE]) { if (human >= 0) return false; human = i; }
-    if (human < 0) return false;
-    DWORD pt = *(DWORD *)(obj + SLOT0 + human * SLOT_SIZE + 0x160);
-    int partner = -1;
-    for (int i = 0; i < 4 && partner < 0; i++) if (i != human && *(DWORD *)(obj + SLOT0 + i * SLOT_SIZE + 0x160) == pt) partner = i;
-    if (partner < 0) { ov_log("training: 1v2: no partner slot on your team, left as it is"); return false; }
-    DWORD unit = *(DWORD *)(obj + SLOT0 + partner * SLOT_SIZE + 0x164);
-    for (int i = partner; i < 3; i++) {   // the slots after it move down one, keeping their own slot index field
-        BYTE *dst = obj + SLOT0 + i * SLOT_SIZE;
-        memcpy(dst, dst + SLOT_SIZE, SLOT_SIZE);
-        *(DWORD *)(dst + 0x158) = (DWORD)i;
-    }
-    *(DWORD *)(obj + O_UNIT_COUNT) = 3;
-    InterlockedIncrement(&g_flips);
-    ov_log("training: 1v2 with team cost: partner (%lu) taken out, units now %lu %lu %lu", unit, *(DWORD *)(obj + SLOT0 + 0x164),
-           *(DWORD *)(obj + SLOT0 + SLOT_SIZE + 0x164), *(DWORD *)(obj + SLOT0 + 2 * SLOT_SIZE + 0x164));
-    return true;
 }
 
 extern "C" void *tr_chain_detour(void *obj, void *a, void *b, void *c) {
     void *r = g_chain_next(obj, a, b, c);   // the bridge's detour (it calls the game's builder, then fills the slots)
     if (obj) InterlockedExchange64(&g_flip_obj, (LONG64)obj);
-    if (g_flip_partner == 1 && obj) flip_partner((BYTE *)obj, false);
-    if (g_flip_partner == 2 && obj) drop_partner((BYTE *)obj);
+    if (g_flip_partner && obj) apply_layout((BYTE *)obj);
     return r;
 }
 
@@ -795,40 +847,45 @@ static bool g_rows_hooked;
 static volatile LONG g_rows_fixed;
 
 extern "C" void tr_payload_fix(BYTE *frame, BYTE *out) {
-    if (g_flip_partner != 2) return;
+    if (!g_flip_partner || !g_layout_out) return;
     DWORD *count = (DWORD *)(out + 0x28);
-    if (*count != 3) return;
-    BYTE *rows = frame + 0x2f0, *row3 = rows + 3 * 0xa0;
+    if (*count < 2 || *count >= 4) return;
+    BYTE *rows = frame + 0x2f0;
     ULONG64 local = *(ULONG64 *)(frame + 0xc0);
-    int me = -1, enemy = -1;
-    for (int i = 0; i < 3; i++) if (*(ULONG64 *)(rows + i * 0xa0) == local) me = i;
-    if (me < 0) { ov_log("training: 1v2 result: your row wasn't found"); return; }
+    int me = -1, cpu = -1, n = (int)*count;
+    for (int i = 0; i < n; i++) if (*(ULONG64 *)(rows + i * 0xa0) == local) me = i; else if (cpu < 0) cpu = i;
+    if (me < 0 || cpu < 0) { ov_log("training: result rows: your row / a CPU row wasn't found"); return; }
     DWORD pt = *(DWORD *)(rows + me * 0xa0 + 0x10);
-    for (int i = 0; i < 3 && enemy < 0; i++) if (*(DWORD *)(rows + i * 0xa0 + 0x10) != pt) enemy = i;
-    if (enemy < 0 || pt > 1) { ov_log("training: 1v2 result: no enemy row"); return; }
-    ULONG64 key = ~0ull;   // the partner's member key (1), or the first one no row uses
-    static const ULONG64 KEYS[4] = { 1, 0, 2, 3 };
-    for (ULONG64 k : KEYS) {
-        bool used = false;
-        for (int i = 0; i < 3; i++) used |= *(ULONG64 *)(rows + i * 0xa0) == k;
-        if (!used) { key = k; break; }
-    }
-    if (key == ~0ull) return;
+    if (pt > 1) return;
     BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
-    DWORD unit = br ? *(DWORD *)(br + 0x31158 + 4) : 0;   // the bridge's member 1 unit (the partner)
-    if (!unit) unit = *(DWORD *)(rows + enemy * 0xa0 + 0xc);
-    memcpy(row3, rows + enemy * 0xa0, 0xa0);
-    *(ULONG64 *)row3 = key;
-    *(DWORD *)(row3 + 0xc) = unit;
-    *(DWORD *)(row3 + 0x10) = pt;
+    while (n < 4) {
+        int mine = 0;
+        for (int i = 0; i < n; i++) mine += *(DWORD *)(rows + i * 0xa0 + 0x10) == pt;
+        DWORD t = mine < 2 ? pt : 1 ^ pt;   // the game's result builder wants 2 teams of 2
+        ULONG64 key = ~0ull;   // a member key no row uses (the bridge positions that were taken out)
+        for (ULONG64 k = 0; k < 4 && key == ~0ull; k++) {
+            bool used = false;
+            for (int i = 0; i < n; i++) used |= *(ULONG64 *)(rows + i * 0xa0) == k;
+            if (!used) key = k;
+        }
+        if (key == ~0ull) return;
+        DWORD unit = br ? *(DWORD *)(br + 0x31158 + 4 * key) : 0;   // that position's unit in the bridge's setup
+        if (!unit) unit = *(DWORD *)(rows + cpu * 0xa0 + 0xc);
+        BYTE *r = rows + n * 0xa0;
+        memcpy(r, rows + cpu * 0xa0, 0xa0);
+        *(ULONG64 *)r = key;
+        *(DWORD *)(r + 0xc) = unit;
+        *(DWORD *)(r + 0x10) = t;
+        n++;
+        ov_log("training: result rows: row added for member %llu (unit %lu, %s team)", key, unit, t == pt ? "your" : "enemy");
+    }
     *count = 4;
     InterlockedIncrement(&g_rows_fixed);
-    ov_log("training: 1v2 result: partner row added (member %llu, unit %lu, team %lu)", key, unit, pt);
 }
 
 // After the game's result builder ran, the bridge checks that every row got its place (bridge 0x7AB1: mov eax,[rcx]
-// / cmp [rdx],eax / jne error 5); the made-up partner row doesn't (ScoreErrors 5, 2026-11-21), so in 1v2 that jne is
-// off too and the row goes on with place 0 (the bridge's own fallback for a key the match doesn't know).
+// / cmp [rdx],eax / jne error 5); the made-up rows don't (ScoreErrors 5, 2026-11-21), so with made-up rows that jne
+// is off too and they go on with place 0 (the bridge's own fallback for a key the match doesn't know).
 static const DWORD BR_PLACE_CHECK = 0x7ab1;
 static const BYTE SIG_PLACE_CHECK[10] = { 0x8b, 0x01, 0x39, 0x02, 0x0f, 0x85, 0x26, 0x02, 0x00, 0x00 };
 
@@ -919,8 +976,7 @@ extern "C" void *tr_restart_detour(void *obj, void *a, void *b, void *c) {
         DWORD n = *(DWORD *)(o + O_UNIT_COUNT);
         ov_log("training: rematch: %lu units, teams %lu %lu %lu %lu", n, *(DWORD *)(o + SLOT0 + 0x160), *(DWORD *)(o + SLOT0 + SLOT_SIZE + 0x160),
                *(DWORD *)(o + SLOT0 + 2 * SLOT_SIZE + 0x160), *(DWORD *)(o + SLOT0 + 3 * SLOT_SIZE + 0x160));
-        if (g_flip_partner == 1) flip_partner(o, true);
-        if (g_flip_partner == 2 && n == 4) drop_partner(o);
+        apply_layout(o);
     }
     return g_restart_tramp(obj, a, b, c);
 }
@@ -997,9 +1053,13 @@ static DWORD WINAPI training_thread(LPVOID) {
             continue;
         }
         // 1v3 / 1v2 with team cost: the bridge's rules on its 2v2, the partner moved / taken out after its setup
-        bool bridge_1v3 = c.partner != 1 && c.consume_cost;
-        LONG solo_mode = !bridge_1v3 ? 0 : c.partner == 2 ? 1 : 2;
-        const char *solo_name = solo_mode == 2 ? "1v2" : "1v3";
+        // the bridge's 2v2 rearranged: 1v1 / 2v1 / 3v1 always, 1v2 / 1v3 with team cost (without it: the game's own
+        // training, below)
+        bool bridge_1v3 = c.partner == 3 || (c.partner != 1 && c.consume_cost);
+        LONG solo_mode = bridge_1v3 ? 1 : 0;
+        int outs = 0;
+        for (int p = 1; p < 4; p++) outs += c.layout[p] < 0;
+        char solo_name[8]; snprintf(solo_name, sizeof(solo_name), "%dv%d", 1 + c.allies, c.enemies);
         if (c.partner != 1 && !bridge_1v3) {   // 1v2 / 1v3: the game's own training with 3 or 4 units, no bridge
             int units = c.partner == 2 ? 4 : 3;
             const char *mode = units == 4 ? "1v3" : "1v2";
@@ -1047,10 +1107,16 @@ static DWORD WINAPI training_thread(LPVOID) {
         }
         if (bridge_1v3 && !chain_hook((BYTE *)GetModuleHandleW(NULL))) { failed = true; continue; }
         if (bridge_1v3) finish_hook();   // diagnostics only: nothing depends on it
-        team_check(solo_mode == 1);      // 1v3: the result screen with 1 vs 3
-        rematch_check(solo_mode == 2);   // 1v2: the rematch even when its result screen fails
-        rows_hook(solo_mode == 2);       // 1v2: a made-up 4th row (the partner) for the result screen
+        team_check(bridge_1v3);                // the result screen with teams other than 2 and 2 (1v3, 3v1)
+        rematch_check(bridge_1v3 && outs > 0);  // fewer than 4 units: the rematch even when the result screen fails
+        rows_hook(bridge_1v3 && outs > 0);      // fewer than 4 units: made-up rows for the result screen
         if (bridge_1v3) restart_hook((BYTE *)GetModuleHandleW(NULL));   // the rematch keeps the 1v3 / 1v2
+        if (bridge_1v3) {   // the layout first, then the flag the game thread checks
+            bool same = g_flip_partner != 0;
+            for (int p = 0; p < 4; p++) { same &= g_layout[p] == c.layout[p]; InterlockedExchange(&g_layout[p], c.layout[p]); }
+            InterlockedExchange(&g_layout_out, outs);
+            if (!same) last_seq = -1;
+        }
         if (g_flip_partner != solo_mode) { InterlockedExchange(&g_flip_partner, solo_mode); last_seq = -1; }
         if (InterlockedExchange(&g_match_over, 0) && any_random_ex(c) && c.seq == last_seq && last_enabled) {
             want_seq = submit(c);   // same setup, new random EX; the status stays as it is
