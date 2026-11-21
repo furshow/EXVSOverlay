@@ -278,7 +278,42 @@ int main(int argc, char **argv) {
                   !memcmp(rc + 9, SIG_REMATCH_CHECK + 9, 7));
             rematch_check(false);
             CHECK(!g_rematch_check_off && !memcmp(rc, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK)));
+            // 1v2 result rows: the stub on the "4 rows?" check
+            CHECK(!memcmp(br + BR_ROWS_CHECK, SIG_ROWS_CHECK, sizeof(SIG_ROWS_CHECK)));
+            rows_hook(true);
+            BYTE *ra = br + BR_ROWS_CHECK;
+            CHECK(g_rows_hooked && ra[0] == 0xE9 && ra + 5 + *(int32_t *)(ra + 1) == g_rows_page && ra[5] == 0x90 && ra[7] == 0x90);
+            CHECK(*(void **)(g_rows_page + 23) == (void *)tr_payload_fix);
+            CHECK(*(BYTE **)(g_rows_page + 31 + 25 + 6) == br + BR_ROWS_OK && *(BYTE **)(g_rows_page + 31 + 25 + 14 + 6) == br + BR_ROWS_BAD);
+            { char sp[MAX_PATH]; snprintf(sp, sizeof(sp), "%sstub.bin", g_test_dir); FILE *sf = fopen(sp, "wb"); fwrite(g_rows_page, 1, 31 + 25 + 28, sf); fclose(sf); }
+            CHECK(br[BR_PLACE_CHECK + 4] == 0x90 && br[BR_PLACE_CHECK + 9] == 0x90 && !memcmp(br + BR_PLACE_CHECK, SIG_PLACE_CHECK, 4));
+            rows_hook(false);
+            CHECK(!g_rows_hooked && !memcmp(br + BR_ROWS_CHECK, SIG_ROWS_CHECK, sizeof(SIG_ROWS_CHECK)));
+            CHECK(!memcmp(br + BR_PLACE_CHECK, SIG_PLACE_CHECK, sizeof(SIG_PLACE_CHECK)));
         }
+    }
+
+    // --- 1v2 result: the made-up 4th row (rows at frame+0x2F0, local key at frame+0xC0, count at out+0x28)
+    {
+        static BYTE frame[0x600], out[0x40];
+        memset(frame, 0, sizeof(frame)); memset(out, 0, sizeof(out));
+        BYTE *rows = frame + 0x2f0;
+        ULONG64 keys[3] = { 0, 2, 3 }; DWORD teams[3] = { 0, 1, 1 };
+        for (int i = 0; i < 3; i++) {
+            *(ULONG64 *)(rows + i * 0xa0) = keys[i]; *(DWORD *)(rows + i * 0xa0 + 0xc) = 7000 + i; *(DWORD *)(rows + i * 0xa0 + 0x10) = teams[i];
+            rows[i * 0xa0 + 0x40] = (BYTE)(0x60 + i);
+        }
+        *(ULONG64 *)(frame + 0xc0) = 0;   // you are member 0
+        *(DWORD *)(out + 0x28) = 3;
+        LONG was = g_flip_partner; g_flip_partner = 2;
+        tr_payload_fix(frame, out);
+        BYTE *r3 = rows + 3 * 0xa0;
+        CHECK(*(DWORD *)(out + 0x28) == 4 && *(ULONG64 *)r3 == 1 && *(DWORD *)(r3 + 0x10) == 0 && r3[0x40] == 0x61);   // a copy of enemy row 1
+        CHECK(*(DWORD *)(r3 + 0xc) != 0);
+        *(DWORD *)(out + 0x28) = 3; g_flip_partner = 1;
+        memset(r3, 0, 0xa0); tr_payload_fix(frame, out);
+        CHECK(*(DWORD *)(out + 0x28) == 3 && *(ULONG64 *)r3 == 0);   // not 1v2: nothing
+        g_flip_partner = was;
     }
 
     printf(fails ? "%d FAILED\n" : "all training tests passed\n", fails);

@@ -780,6 +780,104 @@ static void team_check(bool off) {
     g_team_check_off = off;
 }
 
+// ---- 1v2 result screen: a 4th row for the partner that was taken out -----------------------------------------
+// The bridge's result payload (fn 0x7560) gathers the eligible players into 4 rows of 0xA0 bytes at rbp+0x2F0
+// ({+0 member key (qword), +0xC unit, +0x10 team, ...}, the session's player info) and gives up unless there are 4
+// (ScoreErrors 8 in 1v2). The game's result builder (RVA 0x883250) is made for 2 teams of 2, so in 1v2 a 4th row is
+// made up: a copy of an enemy's row with the partner's member key and unit, on your team (the result shows a 2v2
+// with the partner on 0). The bridge handles a key the match doesn't know (its place lookup, game fn 0x7C63B0,
+// gives -1 -> place 0). A stub on its "4 rows?" check (bridge 0x77F4: cmp dword [r12+28h],4 / je 0x7836) calls
+// tr_payload_fix(rbp, r12) and checks again: 4 rows -> 0x7836, else the original error path at 0x77FC.
+static const DWORD BR_ROWS_CHECK = 0x77f4, BR_ROWS_OK = 0x7836, BR_ROWS_BAD = 0x77fc;
+static const BYTE SIG_ROWS_CHECK[8] = { 0x41, 0x83, 0x7c, 0x24, 0x28, 0x04, 0x74, 0x3a };
+static BYTE *g_rows_page;
+static bool g_rows_hooked;
+static volatile LONG g_rows_fixed;
+
+extern "C" void tr_payload_fix(BYTE *frame, BYTE *out) {
+    if (g_flip_partner != 2) return;
+    DWORD *count = (DWORD *)(out + 0x28);
+    if (*count != 3) return;
+    BYTE *rows = frame + 0x2f0, *row3 = rows + 3 * 0xa0;
+    ULONG64 local = *(ULONG64 *)(frame + 0xc0);
+    int me = -1, enemy = -1;
+    for (int i = 0; i < 3; i++) if (*(ULONG64 *)(rows + i * 0xa0) == local) me = i;
+    if (me < 0) { ov_log("training: 1v2 result: your row wasn't found"); return; }
+    DWORD pt = *(DWORD *)(rows + me * 0xa0 + 0x10);
+    for (int i = 0; i < 3 && enemy < 0; i++) if (*(DWORD *)(rows + i * 0xa0 + 0x10) != pt) enemy = i;
+    if (enemy < 0 || pt > 1) { ov_log("training: 1v2 result: no enemy row"); return; }
+    ULONG64 key = ~0ull;   // the partner's member key (1), or the first one no row uses
+    static const ULONG64 KEYS[4] = { 1, 0, 2, 3 };
+    for (ULONG64 k : KEYS) {
+        bool used = false;
+        for (int i = 0; i < 3; i++) used |= *(ULONG64 *)(rows + i * 0xa0) == k;
+        if (!used) { key = k; break; }
+    }
+    if (key == ~0ull) return;
+    BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+    DWORD unit = br ? *(DWORD *)(br + 0x31158 + 4) : 0;   // the bridge's member 1 unit (the partner)
+    if (!unit) unit = *(DWORD *)(rows + enemy * 0xa0 + 0xc);
+    memcpy(row3, rows + enemy * 0xa0, 0xa0);
+    *(ULONG64 *)row3 = key;
+    *(DWORD *)(row3 + 0xc) = unit;
+    *(DWORD *)(row3 + 0x10) = pt;
+    *count = 4;
+    InterlockedIncrement(&g_rows_fixed);
+    ov_log("training: 1v2 result: partner row added (member %llu, unit %lu, team %lu)", key, unit, pt);
+}
+
+// After the game's result builder ran, the bridge checks that every row got its place (bridge 0x7AB1: mov eax,[rcx]
+// / cmp [rdx],eax / jne error 5); the made-up partner row doesn't (ScoreErrors 5, 2026-11-21), so in 1v2 that jne is
+// off too and the row goes on with place 0 (the bridge's own fallback for a key the match doesn't know).
+static const DWORD BR_PLACE_CHECK = 0x7ab1;
+static const BYTE SIG_PLACE_CHECK[10] = { 0x8b, 0x01, 0x39, 0x02, 0x0f, 0x85, 0x26, 0x02, 0x00, 0x00 };
+
+static void rows_hook(bool on) {
+    BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+    if (!br || on == g_rows_hooked) return;
+    BYTE *at = br + BR_ROWS_CHECK;
+    if (!on) {
+        write_mem(at, SIG_ROWS_CHECK, sizeof(SIG_ROWS_CHECK));
+        write_mem(br + BR_PLACE_CHECK, SIG_PLACE_CHECK, sizeof(SIG_PLACE_CHECK));
+        g_rows_hooked = false;
+        return;
+    }
+    if (memcmp(br + BR_PLACE_CHECK, SIG_PLACE_CHECK, sizeof(SIG_PLACE_CHECK))) { ov_log("training: the bridge's result place check isn't the expected code: no 1v2 result screen"); return; }
+    if (memcmp(at, SIG_ROWS_CHECK, sizeof(SIG_ROWS_CHECK))) { ov_log("training: the bridge's result rows check isn't the expected code: no 1v2 result screen"); return; }
+    if (!g_rows_page) {
+        BYTE *pg = alloc_near_exe(br);
+        if (!pg) return;
+        static const BYTE head[] = {
+            0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,   // push rax rcx rdx r8 r9 r10 r11
+            0x48, 0x83, 0xec, 0x28,                                             // sub rsp,28h (shadow space, rsp 16-aligned)
+            0x48, 0x89, 0xe9,                                                   // mov rcx,rbp
+            0x4c, 0x89, 0xe2,                                                   // mov rdx,r12
+            0x48, 0xb8 };                                                       // mov rax,imm64
+        static const BYTE tail[] = {
+            0xff, 0xd0,                                                         // call rax
+            0x48, 0x83, 0xc4, 0x28,                                             // add rsp,28h
+            0x41, 0x5b, 0x41, 0x5a, 0x41, 0x59, 0x41, 0x58, 0x5a, 0x59, 0x58,   // pop r11 r10 r9 r8 rdx rcx rax
+            0x41, 0x83, 0x7c, 0x24, 0x28, 0x04,                                 // cmp dword [r12+28h],4
+            0x75, 0x0e };                                                       // jne +14 (past the first jmp)
+        BYTE *p = pg;
+        memcpy(p, head, sizeof(head)); p += sizeof(head);
+        void *fn = (void *)tr_payload_fix; memcpy(p, &fn, 8); p += 8;
+        memcpy(p, tail, sizeof(tail)); p += sizeof(tail);
+        write_abs_jmp(p, br + BR_ROWS_OK); p += 14;
+        write_abs_jmp(p, br + BR_ROWS_BAD);
+        FlushInstructionCache(GetCurrentProcess(), pg, 4096);
+        g_rows_page = pg;
+    }
+    BYTE patch[8] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90 };
+    int32_t rel = (int32_t)(g_rows_page - (at + 5));
+    memcpy(patch + 1, &rel, 4);
+    write_mem(at, patch, sizeof(patch));
+    static const BYTE nop6[6] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    write_mem(br + BR_PLACE_CHECK + 4, nop6, 6);
+    g_rows_hooked = true;
+    ov_log("training: 1v2: the result screen gets a row for the partner");
+}
+
 // ---- 1v2 rematch without the result screen -------------------------------------------------------------------
 // The bridge's result data is made for 4 players (the 4-eligible check, a loop of 4 rows, the 2v2 layout), so in
 // 1v2 its finish fails (phase 4, 1 error) and there's no result screen. The rematch doesn't need it: the bridge's
@@ -950,7 +1048,8 @@ static DWORD WINAPI training_thread(LPVOID) {
         if (bridge_1v3 && !chain_hook((BYTE *)GetModuleHandleW(NULL))) { failed = true; continue; }
         if (bridge_1v3) finish_hook();   // diagnostics only: nothing depends on it
         team_check(solo_mode == 1);      // 1v3: the result screen with 1 vs 3
-        rematch_check(solo_mode == 2);   // 1v2: no result screen, straight to the rematch
+        rematch_check(solo_mode == 2);   // 1v2: the rematch even when its result screen fails
+        rows_hook(solo_mode == 2);       // 1v2: a made-up 4th row (the partner) for the result screen
         if (bridge_1v3) restart_hook((BYTE *)GetModuleHandleW(NULL));   // the rematch keeps the 1v3 / 1v2
         if (g_flip_partner != solo_mode) { InterlockedExchange(&g_flip_partner, solo_mode); last_seq = -1; }
         if (InterlockedExchange(&g_match_over, 0) && any_random_ex(c) && c.seq == last_seq && last_enabled) {
