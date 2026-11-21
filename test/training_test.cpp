@@ -270,6 +270,14 @@ int main(int argc, char **argv) {
             CHECK(g_team_check_off && !memcmp(br + BR_TEAM_CHECK, nop22, 22) && br[BR_TEAM_CHECK - 6] == 0x0f && br[BR_TEAM_CHECK + 22] == 0x44);
             team_check(false);
             CHECK(!g_team_check_off && !memcmp(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK)));
+            // 1v2 rematch: the phase 3 / 0 errors jumps off and back on
+            CHECK(!memcmp(br + BR_REMATCH_CHECK, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK)));
+            rematch_check(true);
+            BYTE *rc = br + BR_REMATCH_CHECK;
+            CHECK(g_rematch_check_off && rc[7] == 0x90 && rc[8] == 0x90 && rc[16] == 0x90 && rc[17] == 0x90 && !memcmp(rc, SIG_REMATCH_CHECK, 7) &&
+                  !memcmp(rc + 9, SIG_REMATCH_CHECK + 9, 7));
+            rematch_check(false);
+            CHECK(!g_rematch_check_off && !memcmp(rc, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK)));
         }
     }
 

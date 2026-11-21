@@ -10,6 +10,9 @@ section of the released version as the release notes.
     menu). In 1v3 those two checks are turned off in the loaded bridge (memory only, the file stays unmodified)
   - its rematch makes the match again from the training slots, with the teams put back as 2v2: a detour on the
     game's match restart (RVA 0x7A0710) moves the partner to the enemy team again right before
+- **1v2 with team cost** now has the **automatic rematch** too, staying 1v2, but no result screen: the bridge's
+  result data is made for 4 players. Its rematch only waited for a finished result screen (phase 3, no errors);
+  in 1v2 that check is turned off in the loaded bridge, and the partner is taken out again at the match restart.
 - When a 1v3 / 1v2 match with team cost ends, the bridge's finish state (and the rest of its rule state) is
   logged, so a failed result screen / rematch can be told apart.
 

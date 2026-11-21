@@ -780,6 +780,30 @@ static void team_check(bool off) {
     g_team_check_off = off;
 }
 
+// ---- 1v2 rematch without the result screen -------------------------------------------------------------------
+// The bridge's result data is made for 4 players (the 4-eligible check, a loop of 4 rows, the 2v2 layout), so in
+// 1v2 its finish fails (phase 4, 1 error) and there's no result screen. The rematch doesn't need it: the bridge's
+// exit hook (bridge fn 0x42E0, on game fn 0x7DB5F0) only asks for finish phase 3 with 0 errors before it sets
+// RestartPending. In 1v2 those two jne are turned off in the loaded bridge (memory only), so a 1v2 match goes
+// straight to the rematch; its other conditions (the training's state function and its exit flags) stay.
+static const DWORD BR_REMATCH_CHECK = 0x434d;
+static const BYTE SIG_REMATCH_CHECK[18] = { 0x83, 0x3d, 0xa4, 0xe2, 0x02, 0x00, 0x03, 0x75, 0x69,    // cmp FinishPhase,3; jne
+                                            0x83, 0x3d, 0x97, 0xe2, 0x02, 0x00, 0x00, 0x75, 0x60 };  // cmp FinishErrors,0; jne
+static bool g_rematch_check_off;
+static void rematch_check(bool off) {
+    if (off == g_rematch_check_off) return;
+    BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+    if (!br) return;
+    static const BYTE nop2[2] = { 0x90, 0x90 };
+    if (off) {
+        if (!patch_code(br + BR_REMATCH_CHECK, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK), 7, nop2, 2, "bridge rematch")) return;
+        BYTE half[18]; memcpy(half, SIG_REMATCH_CHECK, 18); memcpy(half + 7, nop2, 2);
+        if (!patch_code(br + BR_REMATCH_CHECK, half, sizeof(half), 16, nop2, 2, "bridge rematch")) { write_mem(br + BR_REMATCH_CHECK, SIG_REMATCH_CHECK, 18); return; }
+        ov_log("training: 1v2: rematch without the result screen");
+    } else write_mem(br + BR_REMATCH_CHECK, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK));
+    g_rematch_check_off = off;
+}
+
 // ---- rematch: the partner moved / taken out again -----------------------------------------------------------
 // The bridge's rematch calls the game's match restart (RVA 0x7A0710, rcx = the training object): it makes the new
 // match from the training slots without going through the builder, and the rematch came out 2v2 (2026-11-21). A
@@ -926,6 +950,7 @@ static DWORD WINAPI training_thread(LPVOID) {
         if (bridge_1v3 && !chain_hook((BYTE *)GetModuleHandleW(NULL))) { failed = true; continue; }
         if (bridge_1v3) finish_hook();   // diagnostics only: nothing depends on it
         team_check(solo_mode == 1);      // 1v3: the result screen with 1 vs 3
+        rematch_check(solo_mode == 2);   // 1v2: no result screen, straight to the rematch
         if (bridge_1v3) restart_hook((BYTE *)GetModuleHandleW(NULL));   // the rematch keeps the 1v3 / 1v2
         if (g_flip_partner != solo_mode) { InterlockedExchange(&g_flip_partner, solo_mode); last_seq = -1; }
         if (InterlockedExchange(&g_match_over, 0) && any_random_ex(c) && c.seq == last_seq && last_enabled) {
