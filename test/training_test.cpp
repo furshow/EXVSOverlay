@@ -182,6 +182,15 @@ int main(int argc, char **argv) {
             CHECK(!memcmp(base + RVA_STAGE_AT, SIG_STAGE_AT, sizeof(SIG_STAGE_AT)) && !memcmp(base + RVA_STAGE_OK, SIG_STAGE_OK, sizeof(SIG_STAGE_OK)));   // stage list functions
             CHECK(patch_code(base + RVA_FOURTH, SIG_FOURTH, 6, 0, NOP6, 6, "4th unit") && !memcmp(base + RVA_FOURTH, NOP6, 6));
             write_mem(base + RVA_FOURTH, SIG_FOURTH, 6);
+
+            // rematch: the hook on the game's match restart (prologue, relay, trampoline)
+            BYTE *rfn = base + RVA_RESTART;
+            CHECK(!memcmp(rfn, RESTART_PROLOGUE, sizeof(RESTART_PROLOGUE)));
+            CHECK(restart_hook(base));
+            CHECK(rfn[0] == 0xE9 && rfn + 5 + *(int32_t *)(rfn + 1) == g_restart_page);
+            CHECK(*(void **)(g_restart_page + 6) == (void *)tr_restart_detour);
+            CHECK(!memcmp(g_restart_page + 16, RESTART_PROLOGUE, 5) && *(BYTE **)(g_restart_page + 21 + 6) == rfn + 5);
+            write_mem(rfn, RESTART_PROLOGUE, 5); g_restart_hooked = false;
         }
     }
 
@@ -241,6 +250,28 @@ int main(int argc, char **argv) {
     char sha[65];
     wchar_t dll[MAX_PATH]; swprintf(dll, MAX_PATH, L"%hs", argc > 2 ? argv[2] : "");
     if (argc > 2) { CHECK(sha256_file(dll, sha) && !strcmp(sha, BRIDGE_SHA256)); }
+
+    // --- the diagnostic hook on the bridge's finish, on the shipped bridge mapped as an image (not run)
+    if (argc > 2) {
+        BYTE *br = (BYTE *)LoadLibraryExW(dll, NULL, DONT_RESOLVE_DLL_REFERENCES);
+        CHECK(br != NULL && (BYTE *)GetModuleHandleW(L"training_bridge.dll") == br);
+        if (br) {
+            BYTE *fn = br + BR_FINISH;
+            CHECK(!memcmp(fn, BR_FINISH_PROLOGUE, sizeof(BR_FINISH_PROLOGUE)));
+            CHECK(finish_hook());
+            CHECK(fn[0] == 0xE9 && fn + 5 + *(int32_t *)(fn + 1) == g_finish_page);
+            CHECK(*(void **)(g_finish_page + 6) == (void *)tr_finish_detour);
+            CHECK(!memcmp(g_finish_page + 16, BR_FINISH_PROLOGUE, 5) && *(BYTE **)(g_finish_page + 21 + 6) == fn + 5);
+            CHECK(finish_hook());   // once
+            // 1v3 result screen: the 2-per-team checks off and back on
+            CHECK(!memcmp(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK)));
+            team_check(true);
+            BYTE nop22[22]; memset(nop22, 0x90, sizeof(nop22));
+            CHECK(g_team_check_off && !memcmp(br + BR_TEAM_CHECK, nop22, 22) && br[BR_TEAM_CHECK - 6] == 0x0f && br[BR_TEAM_CHECK + 22] == 0x44);
+            team_check(false);
+            CHECK(!g_team_check_off && !memcmp(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK)));
+        }
+    }
 
     printf(fails ? "%d FAILED\n" : "all training tests passed\n", fails);
     return fails ? 1 : 0;

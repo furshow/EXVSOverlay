@@ -3,6 +3,16 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [Unreleased]
+### Custom Training
+- **1v3 with team cost** now has the **result screen** and the **automatic rematch**, staying 1v3:
+  - the bridge's result data wanted 2 players per team and gave up with 1 vs 3 (no result screen, back to the
+    menu). In 1v3 those two checks are turned off in the loaded bridge (memory only, the file stays unmodified)
+  - its rematch makes the match again from the training slots, with the teams put back as 2v2: a detour on the
+    game's match restart (RVA 0x7A0710) moves the partner to the enemy team again right before
+- When a 1v3 / 1v2 match with team cost ends, the bridge's finish state (and the rest of its rule state) is
+  logged, so a failed result screen / rematch can be told apart.
+
 ## [1.2.0] - 2026-11-21
 ### Custom Training (EXVS Launcher)
 - New: VS Training as a 2v2, 1v2 or 1v3, set up on the launcher's **Custom Training** page (your unit, partner

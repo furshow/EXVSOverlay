@@ -74,7 +74,8 @@ static bool build_ok(BYTE *base) {
 
 static bool patch_code(BYTE *at, const BYTE *sig, size_t n, size_t off, const BYTE *to, size_t tn, const char *what) {
     if (!memcmp(at + off, to, tn)) {   // already on (bridge reloaded / game restarted from the overlay)
-        BYTE tmp[16]; memcpy(tmp, sig, n); memcpy(tmp + off, to, tn);
+        BYTE tmp[64]; if (n > sizeof(tmp)) return false;
+        memcpy(tmp, sig, n); memcpy(tmp + off, to, tn);
         if (!memcmp(at, tmp, n)) return true;
     }
     if (memcmp(at, sig, n)) { set_status("error", "The %s code isn't the expected one (another mod changed it?)", what); return false; }
@@ -375,9 +376,16 @@ static void watch_rules(void) {
     static const DWORD OFF[6] = { 136, 132, 172, 188, 180, 184 };
     DWORD now[6]; bool changed = false;
     for (int i = 0; i < 6; i++) { now[i] = f(OFF[i]); changed |= now[i] != last[i]; }
-    if (changed && last[0] != ~0u)
+    if (changed && last[0] != ~0u) {
         ov_log("training: finish phase %lu (errors %lu), rematch pending %lu phase %lu, rematches %lu (errors %lu)",
                now[0], now[1], now[2], now[3], now[4], now[5]);
+        // the rest of the bridge's RuleState (block offsets 112-276), for the 1v3 / 1v2 finish research:
+        // FinishStarted 116, PayloadReady 192, ScoreRows 196, ScoreErrors 200, LocalTeam 204, EnumeratedActors 232,
+        // EligibleActors 236, PayloadStage 240 (0x110 = ok), EngineMatched 244, ResultDeferred 268, ResultLaunches 272
+        char buf[512]; int k = 0;
+        for (DWORD o = 112; o <= 276 && k < (int)sizeof(buf) - 16; o += 4) k += snprintf(buf + k, sizeof(buf) - k, "%lX ", f(o));
+        ov_log("training:   rules 112-276: %s", buf);
+    }
     memcpy(last, now, sizeof(last));
 }
 
@@ -641,7 +649,7 @@ static void log_owner_after_match(void) {
     if (!ReadProcessMemory(GetCurrentProcess(), (void *)(ULONG_PTR)obj, buf, sizeof(buf), &got) || got != sizeof(buf) ||
         *(ULONG64 *)buf != (ULONG64)(base + RVA_OWNER_VTABLE)) { ov_log("training: 1v3: the training object is gone after the match"); return; }
     ULONG64 st = *(ULONG64 *)(buf + 0x468);
-    ov_log("training: 1v3 match over: state fn %s0x%llX, flags 12FC-1300 = %u %u %u %u %u", st >= (ULONG64)base ? "RVA " : "",
+    ov_log("training: %s match over: state fn %s0x%llX, flags 12FC-1300 = %u %u %u %u %u", g_flip_partner == 2 ? "1v2" : "1v3", st >= (ULONG64)base ? "RVA " : "",
            st >= (ULONG64)base ? st - (ULONG64)base : st, buf[0x12fc], buf[0x12fd], buf[0x12fe], buf[0x12ff], buf[0x1300]);
 }
 
@@ -674,6 +682,147 @@ extern "C" void *tr_chain_detour(void *obj, void *a, void *b, void *c) {
     if (g_flip_partner == 1 && obj) flip_partner((BYTE *)obj, false);
     if (g_flip_partner == 2 && obj) drop_partner((BYTE *)obj);
     return r;
+}
+
+// ---- diagnostics: the bridge's finish in 1v3 / 1v2 with team cost ----------------------------------------
+// There the bridge's finish ends in phase 4 with an error (back to the menu, no rematch). Its finish detour
+// (bridge fn 0x2D10, on game fn 0x7DBCF0, rcx = the match owner) is watched: whenever the finish phase or error
+// count changes, what it decides on is logged: the owner's children at +0x114C (the result scene it expects,
+// class RVA 0x18A7720) and +0x1198, the training object's flags and state, and the bridge's globals 0x32510-0x32547
+// (0x32514 / 0x32515 armed, 0x32528 owner, 0x32530 training object, 0x32538 result scene seen being made).
+static const DWORD BR_FINISH = 0x2d10, BR_PHASE = 0x325f8, BR_FERR = 0x325f4, RVA_CHILD_INDEX = 0x11f690;
+static const BYTE BR_FINISH_PROLOGUE[10] = { 0x48, 0x89, 0x4c, 0x24, 0x08, 0x53, 0x48, 0x83, 0xec, 0x20 };   // mov [rsp+8],rcx; push rbx; sub rsp,20h
+typedef void *(*FinishFn)(void *, void *, void *, void *);
+typedef int (*ChildIndexFn)(void *, void *);
+static FinishFn g_finish_tramp;
+static BYTE *g_finish_page;
+static bool g_finish_hooked;
+
+static void log_child(BYTE *base, BYTE *owner, DWORD off, char *out, size_t n) {
+    int idx = ((ChildIndexFn)(base + RVA_CHILD_INDEX))(owner, owner + off);
+    BYTE *c = idx >= 0 && idx < 0x40 ? *(BYTE **)(owner + 0x38 + idx * 16) : NULL;
+    ULONG64 vt = 0; SIZE_T got = 0;
+    if (c) ReadProcessMemory(GetCurrentProcess(), c, &vt, 8, &got);
+    snprintf(out, n, "+%lX handle %08lX/%08lX -> idx %d %p class %s0x%llX", off, *(DWORD *)(owner + off), *(DWORD *)(owner + off + 4), idx, c,
+             vt >= (ULONG64)base ? "RVA " : "", vt >= (ULONG64)base ? vt - (ULONG64)base : vt);
+}
+
+static void log_finish(BYTE *br, BYTE *owner, DWORD ph0, DWORD er0) {
+    BYTE *base = (BYTE *)GetModuleHandleW(NULL);
+    char a[160], b[160];
+    log_child(base, owner, 0x114c, a, sizeof(a));
+    log_child(base, owner, 0x1198, b, sizeof(b));
+    ov_log("training: finish %lu/%lu -> %lu/%lu, owner %p (class RVA 0x%llX): %s; %s", ph0, er0, *(DWORD *)(br + BR_PHASE), *(DWORD *)(br + BR_FERR),
+           owner, *(ULONG64 *)owner - (ULONG64)base, a, b);
+    BYTE *tr = *(BYTE **)(br + 0x32530);
+    if (tr) ov_log("training:   training %p flags 12FC-1300 = %u %u %u %u %u, state RVA 0x%llX", tr, tr[0x12fc], tr[0x12fd], tr[0x12fe], tr[0x12ff], tr[0x1300],
+                   *(ULONG64 *)(tr + 0x468) - (ULONG64)base);
+    const BYTE *g = br + 0x32510;
+    ov_log("training:   bridge 32510: %02X %02X %02X %02X | %02X %02X %02X %02X | 32518 %p 32520 %p 32528 %p 32530 %p 32538 %p | 32540 %02X %02X %02X %02X %02X %02X %02X %02X",
+           g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7], *(void **)(g + 8), *(void **)(g + 0x10), *(void **)(g + 0x18), *(void **)(g + 0x20),
+           *(void **)(g + 0x28), g[0x30], g[0x31], g[0x32], g[0x33], g[0x34], g[0x35], g[0x36], g[0x37]);
+}
+
+extern "C" void *tr_finish_detour(void *owner, void *a, void *b, void *c) {
+    BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+    DWORD ph0 = *(volatile DWORD *)(br + BR_PHASE), er0 = *(volatile DWORD *)(br + BR_FERR);
+    void *r = g_finish_tramp(owner, a, b, c);
+    if (g_flip_partner && owner && (*(volatile DWORD *)(br + BR_PHASE) != ph0 || *(volatile DWORD *)(br + BR_FERR) != er0))
+        log_finish(br, (BYTE *)owner, ph0, er0);
+    return r;
+}
+
+static bool finish_hook(void) {
+    if (g_finish_hooked) return true;
+    BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+    if (!br) return false;
+    BYTE *fn = br + BR_FINISH;
+    if (memcmp(fn, BR_FINISH_PROLOGUE, sizeof(BR_FINISH_PROLOGUE))) { ov_log("training: the bridge's finish code isn't the expected one, not watched"); return false; }
+    if (!g_finish_page) {
+        BYTE *pg = alloc_near_exe(br);   // near the bridge for its 5-byte jmp
+        if (!pg) return false;
+        write_abs_jmp(pg, (const void *)tr_finish_detour);
+        memcpy(pg + 16, fn, 5);                  // mov [rsp+8],rcx (position-independent)
+        write_abs_jmp(pg + 21, fn + 5);
+        FlushInstructionCache(GetCurrentProcess(), pg, 4096);
+        g_finish_tramp = (FinishFn)(pg + 16);
+        g_finish_page = pg;
+    }
+    BYTE patch[5] = { 0xE9 };
+    int32_t rel = (int32_t)(g_finish_page - (fn + 5));
+    memcpy(patch + 1, &rel, 4);
+    write_mem(fn, patch, 5);
+    g_finish_hooked = true;
+    ov_log("training: watching the bridge's finish (1v3 / 1v2 rematch research)");
+    return true;
+}
+
+// ---- 1v3 result screen: the bridge's score rows need 2 players per team ------------------------------------
+// Its result payload (bridge fn 0x7560, called from its hook on game fn 0x7DBAB0) counts the eligible players of
+// each team and gives up unless they're 2 and 2 (ScoreErrors 3, seen 2026-11-21 in 1v3: no result screen, the
+// finish goes to phase 4 and back to the menu, no rematch). For 1v3 those two checks are turned off in the
+// loaded bridge (memory only; the file stays unmodified): cmp [rsp+20h],2 / jne / cmp [rsp+24h],2 / jne at 0x78E6.
+// The "exactly one local player" check before them stays.
+static const DWORD BR_TEAM_CHECK = 0x78e6;
+static const BYTE SIG_TEAM_CHECK[22] = { 0x83, 0x7c, 0x24, 0x20, 0x02, 0x0f, 0x85, 0x0c, 0x04, 0x00, 0x00,
+                                         0x83, 0x7c, 0x24, 0x24, 0x02, 0x0f, 0x85, 0x01, 0x04, 0x00, 0x00 };
+static bool g_team_check_off;
+static void team_check(bool off) {
+    if (off == g_team_check_off) return;
+    BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+    if (!br) return;
+    static BYTE nops[sizeof(SIG_TEAM_CHECK)];
+    memset(nops, 0x90, sizeof(nops));
+    if (off) {
+        if (!patch_code(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK), 0, nops, sizeof(nops), "bridge result teams")) return;
+        ov_log("training: 1v3: the bridge's result screen accepts 1 vs 3");
+    } else write_mem(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK));
+    g_team_check_off = off;
+}
+
+// ---- rematch: the partner moved / taken out again -----------------------------------------------------------
+// The bridge's rematch calls the game's match restart (RVA 0x7A0710, rcx = the training object): it makes the new
+// match from the training slots without going through the builder, and the rematch came out 2v2 (2026-11-21). A
+// detour on it moves the partner (1v3) / takes it out (1v2) again right before, logging the teams it found.
+static const DWORD RVA_RESTART = 0x7a0710;
+static const BYTE RESTART_PROLOGUE[10] = { 0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18 };   // mov [rsp+10h],rbx; mov [rsp+18h],rsi
+typedef void *(*RestartFn)(void *, void *, void *, void *);
+static RestartFn g_restart_tramp;
+static BYTE *g_restart_page;
+static bool g_restart_hooked;
+
+extern "C" void *tr_restart_detour(void *obj, void *a, void *b, void *c) {
+    if (g_flip_partner && obj) {
+        BYTE *o = (BYTE *)obj;
+        DWORD n = *(DWORD *)(o + O_UNIT_COUNT);
+        ov_log("training: rematch: %lu units, teams %lu %lu %lu %lu", n, *(DWORD *)(o + SLOT0 + 0x160), *(DWORD *)(o + SLOT0 + SLOT_SIZE + 0x160),
+               *(DWORD *)(o + SLOT0 + 2 * SLOT_SIZE + 0x160), *(DWORD *)(o + SLOT0 + 3 * SLOT_SIZE + 0x160));
+        if (g_flip_partner == 1) flip_partner(o, true);
+        if (g_flip_partner == 2 && n == 4) drop_partner(o);
+    }
+    return g_restart_tramp(obj, a, b, c);
+}
+
+static bool restart_hook(BYTE *base) {
+    if (g_restart_hooked) return true;
+    BYTE *fn = base + RVA_RESTART;
+    if (memcmp(fn, RESTART_PROLOGUE, sizeof(RESTART_PROLOGUE))) { ov_log("training: the game's match restart isn't the expected code: no 1v3 / 1v2 rematch fix"); return false; }
+    if (!g_restart_page) {
+        BYTE *pg = alloc_near_exe(base);
+        if (!pg) return false;
+        write_abs_jmp(pg, (const void *)tr_restart_detour);
+        memcpy(pg + 16, fn, 5);                  // mov [rsp+10h],rbx (position-independent)
+        write_abs_jmp(pg + 21, fn + 5);
+        FlushInstructionCache(GetCurrentProcess(), pg, 4096);
+        g_restart_tramp = (RestartFn)(pg + 16);
+        g_restart_page = pg;
+    }
+    BYTE patch[5] = { 0xE9 };
+    int32_t rel = (int32_t)(g_restart_page - (fn + 5));
+    memcpy(patch + 1, &rel, 4);
+    write_mem(fn, patch, 5);
+    g_restart_hooked = true;
+    return true;
 }
 
 static bool chain_hook(BYTE *base) {
@@ -775,6 +924,9 @@ static DWORD WINAPI training_thread(LPVOID) {
             last_enabled = true; last_seq = -1; continue;
         }
         if (bridge_1v3 && !chain_hook((BYTE *)GetModuleHandleW(NULL))) { failed = true; continue; }
+        if (bridge_1v3) finish_hook();   // diagnostics only: nothing depends on it
+        team_check(solo_mode == 1);      // 1v3: the result screen with 1 vs 3
+        if (bridge_1v3) restart_hook((BYTE *)GetModuleHandleW(NULL));   // the rematch keeps the 1v3 / 1v2
         if (g_flip_partner != solo_mode) { InterlockedExchange(&g_flip_partner, solo_mode); last_seq = -1; }
         if (InterlockedExchange(&g_match_over, 0) && any_random_ex(c) && c.seq == last_seq && last_enabled) {
             want_seq = submit(c);   // same setup, new random EX; the status stays as it is
