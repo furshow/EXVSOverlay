@@ -3,12 +3,13 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
-## [Unreleased]
+## [1.2.0] - 2026-11-21
 ### Custom Training (EXVS Launcher)
-- New: VS Training as a 2v2, set up on the launcher's **2v2** page (your unit, partner and two enemies, CPU
-  level and EX of each one, random stage, team cost). When it's on, the overlay loads `Training\training_bridge.dll`
-  (aerial's 2v2 Training Extension 1.1 bridge, shipped unmodified by the launcher) inside the game and applies the
-  launcher's settings from `Training\training.ini` whenever they change; the state goes to `Training\status.ini`.
+- New: VS Training as a 2v2, 1v2 or 1v3, set up on the launcher's **Custom Training** page (your unit, partner
+  and two enemies, CPU behavior and EX of each one, random stage, team cost). When it's on, the overlay loads
+  `Training\training_bridge.dll` (aerial's 2v2 Training Extension 1.1 bridge, shipped unmodified by the launcher)
+  inside the game and applies the launcher's settings from `Training\training.ini` whenever they change; the state
+  goes to `Training\status.ini`.
 - It checks the build instead of exact file hashes: any 1.13.30 client works (PE build stamp `0x69E2081B`),
   with or without other exe mods, as long as the two 2v2 code spots are untouched. Only the 2v2 patches of
   aerial's `isohook_2v2.dll` are applied; that DLL itself isn't loaded. No DLL injection, no administrator rights.
@@ -16,12 +17,12 @@ section of the released version as the release notes.
 - Random EX: a new F / S / E is drawn for every match of a slot set to Random.
 - Random unit by category (a cost or the bosses, from the launcher's `SlotPool<n>`): the overlay picks one for
   every match (the bridge only has one random list for all slots).
-- **1v2** (partner off in the launcher): the bridge only runs 4 units, so it isn't loaded. The overlay applies only the
-  player-count and gate patches (the game then builds you + 2 CPUs) and hooks the training builder to write the
+- **1v2** (partner off in the launcher): the bridge only runs 4 units, so it isn't loaded. The overlay applies only
+  the player-count and gate patches (the game then builds you + 2 CPUs) and hooks the training builder to write the
   enemies' unit, EX and CPU behavior into those 3 slots. **1v3** (partner on the enemy team) adds the bridge's
   4th-unit patch, so the game builds 4 units, and the partner slot goes to the enemy team. Random stage works there
-  too (a playable stage from the game's list, written into the training match like the bridge does). Start is hidden while that training runs. Switching from
-  2v2 to 1v2 needs a game restart once the bridge has been loaded.
+  too (a playable stage from the game's list, written into the training match like the bridge does). Start is
+  hidden while that training runs. Switching from 2v2 to 1v2 needs a game restart once the bridge has been loaded.
 - **1v3 with team cost** (experimental): the bridge runs its normal 2v2 (so its team cost, COST OVER, finish, result
   screen work) and a second detour, chained in front of the bridge's on the training builder, moves the partner
   slot to the enemy team right after the bridge fills the slots. The bridge's VS intro is off for it (its VS screen
