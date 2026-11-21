@@ -3,7 +3,7 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
-## [Unreleased]
+## [1.2.1] - 2026-11-21
 ### Custom Training
 - **Any layout up to 4 units**: 1v1, 1v2, 2v1, 1v3, 2v2 and 3v1, from the launcher's per-CPU teams (`Team2..4` /
   `On2..4` in `Training\training.ini`; the old `Partner` key still works). The launcher's slots go into the bridge's
