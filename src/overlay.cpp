@@ -624,6 +624,7 @@ static DWORD WINAPI init_thread(LPVOID) {
     menu_load_config();
     // splitscreen: only player 1's copy looks for updates (the others would download the same one)
     upd_startup(menu_enabled() && menu_auto_update() && split_player() <= 1);
+    training_init();   // Custom Training from the EXVS Launcher (works with the menu disabled too)
     if (!menu_enabled()) { ov_log("overlay disabled in EXVSOverlay.ini (enabled=0)"); return 0; }
     focus_init();                         // keyboard / controller while the game isn't focused
     if (menu_hud_enabled()) hud_init();   // hide-HUD detours: early, before the game draws any HUD

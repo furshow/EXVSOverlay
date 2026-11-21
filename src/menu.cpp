@@ -369,22 +369,32 @@ static int arcade_vk_cache[ARCADE_COUNT];
 static bool arcade_key_down[ARCADE_COUNT];
 static int capture_slot = -1;   // which arcade button is waiting for a controller press
 
+// Virtual key of a loader key name ("B", "F3", "Return", "UpArr", "5 (NumPad)"...), 0 if unknown.
+int menu_key_vk(const char *name) {
+    char v[32]; snprintf(v, sizeof(v), "%s", name);
+    char *s = v; while (*s == ' ' || *s == '\t') s++;
+    char *e = s + strlen(s); while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == ',')) *--e = 0;
+    if (strchr(s, ',')) *strchr(s, ',') = 0;   // several keys: use the first one
+    if ((s[0] == 'F' || s[0] == 'f') && s[1] >= '1' && s[1] <= '9') { int n = atoi(s + 1); return n >= 1 && n <= 24 ? VK_F1 + n - 1 : 0; }
+    if (strlen(s) == 1 && isalnum((unsigned char)s[0])) return toupper((unsigned char)s[0]);
+    if (strstr(s, "(NumPad)") && s[0] >= '0' && s[0] <= '9') return VK_NUMPAD0 + (s[0] - '0');
+    static const struct { const char *n; int vk; } names[] = {
+        { "Enter", VK_RETURN }, { "Return", VK_RETURN }, { "Space", VK_SPACE }, { "Tab", VK_TAB }, { "Backspace", VK_BACK },
+        { "UpArr", VK_UP }, { "DownArr", VK_DOWN }, { "LeftArr", VK_LEFT }, { "RightArr", VK_RIGHT }, { "Insert", VK_INSERT },
+        { "Delete", VK_DELETE }, { "Home", VK_HOME }, { "End", VK_END }, { "PgUp", VK_PRIOR }, { "PgDown", VK_NEXT }, { "Pause", VK_PAUSE } };
+    for (auto &k : names) if (!_stricmp(s, k.n)) return k.vk;
+    return 0;
+}
+
 static int arcade_vk(int slot) {
     int &vk = arcade_vk_cache[slot];
     if (vk) return vk;
     char cfgp[MAX_PATH], v[32];
     snprintf(cfgp, sizeof(cfgp), "%sconfig.ini", ov_cfg_dir());
     GetPrivateProfileStringA("keyboard", ARCADE[slot].cfg_key, ARCADE[slot].default_key, v, sizeof(v), cfgp);
-    char *s = v; while (*s == ' ' || *s == '\t') s++;
-    char *e = s + strlen(s); while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == ',')) *--e = 0;
-    if (strchr(s, ',')) *strchr(s, ',') = 0;   // several keys: use the first one
-    if ((s[0] == 'F' || s[0] == 'f') && s[1] >= '1' && s[1] <= '9') { int n = atoi(s + 1); if (n >= 1 && n <= 24) vk = VK_F1 + n - 1; }
-    else if (strlen(s) == 1 && isalnum((unsigned char)s[0])) vk = toupper((unsigned char)s[0]);
-    else if (!_stricmp(s, "Enter")) vk = VK_RETURN;
-    else if (!_stricmp(s, "Space")) vk = VK_SPACE;
-    else if (!_stricmp(s, "Tab")) vk = VK_TAB;
+    vk = menu_key_vk(v);
     if (!vk) vk = ARCADE[slot].default_key[0] == 'F' ? VK_F1 + atoi(ARCADE[slot].default_key + 1) - 1 : ARCADE[slot].default_key[0];
-    ov_log("%s key from config.ini: '%s' -> vk 0x%02X", ARCADE[slot].name, s, vk);
+    ov_log("%s key from config.ini: '%s' -> vk 0x%02X", ARCADE[slot].name, v, vk);
     return vk;
 }
 
@@ -430,6 +440,11 @@ static void card_tick(bool focus) {
 
 void menu_filter_gamepad(XINPUT_GAMEPAD_ *g) {
     if (menu_pad_blocked()) { memset(g, 0, sizeof(*g)); return; }   // menu open / game not focused
+    if (training_block_start()) {   // 2v2 match: the training pause menu would freeze the game
+        WORD m = training_start_pad_mask();
+        if (g->wButtons & m) training_note_start_blocked("controller");
+        g->wButtons &= (WORD)~m;
+    }
     if (!cfg.card_hide) return;
     for (int s = 0; s < ARCADE_COUNT; s++) {
         int btn = cfg.arcade_button[s];

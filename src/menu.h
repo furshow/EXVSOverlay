@@ -2,7 +2,7 @@
 #pragma once
 #include <windows.h>
 
-#define OVERLAY_VERSION "1.1.0"
+#define OVERLAY_VERSION "1.2.0"
 #define OVERLAY_WIDEN2_(x) L##x
 #define OVERLAY_WIDEN_(x) OVERLAY_WIDEN2_(x)
 #define OVERLAY_VERSION_W OVERLAY_WIDEN_(OVERLAY_VERSION)
@@ -55,7 +55,16 @@ bool split_keyboard(void);        // the keyboard reaches this copy
 bool split_virtual_key(int vk);   // card / coin key held by the overlay for this copy only
 void split_set_virtual_key(int vk, bool down);
 
+// training.cpp (Custom Training: loads Training\training_bridge.dll and applies the launcher's Training\training.ini)
+void training_init(void);
+bool training_block_start(void);          // a 2v2 match is running: hide Start from the game
+int training_start_vk(void);              // [keyboard] Start of config.ini
+WORD training_start_pad_mask(void);       // XInput Start + [controller] ArcadeStartButton
+bool training_start_hid_button(USHORT b); // HID button number listed in [controller] / [controller-1] Start
+void training_note_start_blocked(const char *from);
+
 // menu.cpp
+int menu_key_vk(const char *name);  // loader key name -> virtual key (0 = unknown)
 bool menu_keyboard_blocked(void);   // keyboard / mouse: menu open, not focused (option), or not this split player's
 bool menu_pad_blocked(void);        // controllers: menu open, or not focused (option; never in splitscreen)
 bool menu_auto_update(void);

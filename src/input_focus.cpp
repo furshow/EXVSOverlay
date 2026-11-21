@@ -55,6 +55,10 @@ static bool pad_blocked(void) { return count_blocked(menu_pad_blocked(), 1); }
 static SHORT WINAPI h_GetAsyncKeyState(int vk) {
     SHORT r = rGetAsyncKeyState(vk);   // always called: it also resets the "pressed since last call" bit
     if (split_virtual_key(vk)) return (SHORT)0x8001;   // splitscreen: card / coin button of this copy's pad
+    if (vk == training_start_vk() && training_block_start()) {   // 2v2 match: no training pause menu
+        if (r & 0x8000) training_note_start_blocked("keyboard");
+        return 0;
+    }
     return kb_blocked() ? 0 : r;
 }
 
@@ -167,6 +171,14 @@ static NTSTATUS_ WINAPI h_HidP_GetUsages(int type, USHORT page, USHORT link, USH
     NTSTATUS_ st = rHidP_GetUsages(type, page, link, list, len, pp, rep, rlen);
     if (st == HIDP_STATUS_SUCCESS_ && len && list && type == 0 /*HidP_Input*/ && page == 0x09) hid_record_buttons(pp, list, *len);
     if (st == HIDP_STATUS_SUCCESS_ && len && pad_blocked()) *len = 0;   // no button pressed
+    else if (st == HIDP_STATUS_SUCCESS_ && len && list && page == 0x09 && training_block_start()) {   // 2v2 match: drop Start
+        ULONG w = 0;
+        for (ULONG i = 0; i < *len; i++) {
+            if (training_start_hid_button(list[i])) training_note_start_blocked("controller");
+            else list[w++] = list[i];
+        }
+        *len = w;
+    }
     return st;
 }
 
