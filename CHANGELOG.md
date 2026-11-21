@@ -3,6 +3,29 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.2.1] - 2026-11-21
+### Custom Training
+- **Any layout up to 4 units**: 1v1, 1v2, 2v1, 1v3, 2v2 and 3v1, from the launcher's per-CPU teams (`Team2..4` /
+  `On2..4` in `Training\training.ini`; the old `Partner` key still works). The launcher's slots go into the bridge's
+  4 positions with your CPUs first and the enemies after, so a 2v2 is the bridge's own; for the others the bridge
+  runs its 2v2 and the overlay moves positions to the other team or takes them out after the bridge's setup and
+  again before every rematch. The result screen gets made-up rows for positions taken out (on the team that has
+  fewer than 2), and its 2-per-team check is off for those layouts. 1v2 / 1v3 without team cost keep the game's
+  own training.
+- **1v3 with team cost** now has the **result screen** and the **automatic rematch**, staying 1v3:
+  - the bridge's result data wanted 2 players per team and gave up with 1 vs 3 (no result screen, back to the
+    menu). In 1v3 those two checks are turned off in the loaded bridge (memory only, the file stays unmodified)
+  - its rematch makes the match again from the training slots, with the teams put back as 2v2: a detour on the
+    game's match restart (RVA 0x7A0710) moves the partner to the enemy team again right before
+- **1v2 with team cost** now has the **result screen** and the **automatic rematch** too, staying 1v2:
+  - the bridge's result data is made for 4 players (2 teams of 2, for the game's result builder). In 1v2 a 4th
+    row is added for the partner that was taken out (a copy of an enemy's row with the partner's unit, on your
+    team), and the bridge's check that every row got its place after the game's builder is skipped for it
+  - its rematch waited for a finished result screen (phase 3, no errors); in 1v2 that check is off too, so a
+    failed result screen still leads to the rematch. The partner is taken out again at the match restart
+- When a 1v3 / 1v2 match with team cost ends, the bridge's finish state (and the rest of its rule state) is
+  logged, so a failed result screen / rematch can be told apart.
+
 ## [1.2.0] - 2026-11-21
 ### Custom Training (EXVS Launcher)
 - New: VS Training as a 2v2, 1v2 or 1v3, set up on the launcher's **Custom Training** page (your unit, partner

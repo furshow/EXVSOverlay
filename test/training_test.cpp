@@ -139,20 +139,75 @@ int main(int argc, char **argv) {
     InterlockedExchange(&g_1v2_on, 0);
     InterlockedExchange64(&g_1v2_obj, 0);
 
-    // --- 1v3 with team cost: after the bridge's 2v2 (teams 0,0,1,1 around the human in slot 2) the partner moves
+    // --- layouts: after the bridge's 2v2 (teams 0,0,1,1 around the human in slot 2) the positions are rearranged
     *(DWORD *)(obj + O_UNIT_COUNT) = 4;
     for (int i = 0; i < 4; i++) {
         BYTE *sl = obj + SLOT0 + i * SLOT_SIZE;
         sl[0] = i == 2; *(DWORD *)(sl + 0x164) = 1000 + i;
     }
-    // human slot 2 on team 1 (the bridge writes team ^ player team): partner = first other slot (0), enemies 1 and 3
+    // human slot 2 on team 1 (the bridge writes team ^ player team): position 1 = slot 0, enemies slots 1 and 3
     *(DWORD *)(obj + SLOT0 + 2 * SLOT_SIZE + 0x160) = 1; *(DWORD *)(obj + SLOT0 + 0x160) = 1;
     *(DWORD *)(obj + SLOT0 + SLOT_SIZE + 0x160) = 0; *(DWORD *)(obj + SLOT0 + 3 * SLOT_SIZE + 0x160) = 0;
-    CHECK(flip_partner(obj, false));
+    g_layout[0] = 0; g_layout[1] = 1; g_layout[2] = 1; g_layout[3] = 1;   // 1v3
+    CHECK(apply_layout(obj));
     CHECK(*(DWORD *)(obj + SLOT0 + 0x160) == 0 && *(DWORD *)(obj + SLOT0 + SLOT_SIZE + 0x160) == 0 && *(DWORD *)(obj + SLOT0 + 3 * SLOT_SIZE + 0x160) == 0);
-    CHECK(*(DWORD *)(obj + SLOT0 + 2 * SLOT_SIZE + 0x160) == 1 && g_flips == 1);   // you alone on your team
-    CHECK(!flip_partner(obj, true));   // already moved (a rematch): the first other slot isn't on your team any more
-    CHECK(g_flips == 1);
+    CHECK(*(DWORD *)(obj + SLOT0 + 2 * SLOT_SIZE + 0x160) == 1 && g_flips == 1 && *(DWORD *)(obj + O_UNIT_COUNT) == 4);   // you alone on your team
+    CHECK(!apply_layout(obj) && g_flips == 1);   // already done (a rematch that kept it): nothing
+    {   // every layout on a fresh bridge 2v2 (you in slot 0, partner 1, enemies 2 and 3)
+        struct L { int lay[4]; int count; DWORD units[4]; DWORD teams[4]; } cases[] = {
+            { { 0, 0, 1, 1 }, 4, { 1000, 1001, 1002, 1003 }, { 0, 0, 1, 1 } },    // 2v2: nothing to do
+            { { 0, 1, 1, 1 }, 4, { 1000, 1001, 1002, 1003 }, { 0, 1, 1, 1 } },    // 1v3
+            { { 0, -1, 1, 1 }, 3, { 1000, 1002, 1003, 0 }, { 0, 1, 1, 9 } },      // 1v2
+            { { 0, 0, 1, -1 }, 3, { 1000, 1001, 1002, 0 }, { 0, 0, 1, 9 } },      // 2v1
+            { { 0, 0, 0, 1 }, 4, { 1000, 1001, 1002, 1003 }, { 0, 0, 0, 1 } },    // 3v1
+            { { 0, -1, 1, -1 }, 2, { 1000, 1002, 0, 0 }, { 0, 1, 9, 9 } },        // 1v1
+        };
+        for (auto &k : cases) {
+            static BYTE o[SLOT0 + 4 * SLOT_SIZE + 0x1200];
+            memset(o, 0, sizeof(o));
+            *(DWORD *)(o + O_UNIT_COUNT) = 4;
+            for (int i = 0; i < 4; i++) {
+                BYTE *sl = o + SLOT0 + i * SLOT_SIZE;
+                sl[0] = i == 0; *(DWORD *)(sl + 0x158) = i; *(DWORD *)(sl + 0x160) = i >= 2; *(DWORD *)(sl + 0x164) = 1000 + i;
+            }
+            for (int p = 0; p < 4; p++) g_layout[p] = k.lay[p];
+            apply_layout(o);
+            CHECK(*(DWORD *)(o + O_UNIT_COUNT) == (DWORD)k.count);
+            for (int i = 0; i < k.count; i++) {
+                BYTE *sl = o + SLOT0 + i * SLOT_SIZE;
+                CHECK(*(DWORD *)(sl + 0x164) == k.units[i] && *(DWORD *)(sl + 0x160) == k.teams[i] && *(DWORD *)(sl + 0x158) == (DWORD)i);
+                CHECK((sl[0] != 0) == (i == 0));   // the human stays in slot 0
+            }
+        }
+    }
+
+    // --- read_config: the launcher's slots (Team / On) in the bridge's positions
+    {
+        struct A { const char *keys; int partner, a, e; int lay[4]; int units[4]; } cases[] = {
+            { "Team2=0\nTeam3=1\nTeam4=1\nOn2=1\nOn3=1\nOn4=1\n", 1, 1, 2, { 0, 0, 1, 1 }, { 0, 2, 3, 4 } },   // 2v2 as it is
+            { "Team2=1\nTeam3=0\nTeam4=1\nOn2=1\nOn3=1\nOn4=1\n", 1, 1, 2, { 0, 0, 1, 1 }, { 0, 3, 2, 4 } },   // ally in slot 3: still the plain 2v2
+            { "Team2=1\nTeam3=1\nTeam4=1\nOn2=1\nOn3=1\nOn4=1\n", 2, 0, 3, { 0, 1, 1, 1 }, { 0, 4, 2, 3 } },   // 1v3
+            { "Team2=0\nTeam3=1\nTeam4=1\nOn2=0\nOn3=1\nOn4=1\n", 0, 0, 2, { 0, -1, 1, 1 }, { 0, 2, 3, 4 } },  // 1v2
+            { "Team2=0\nTeam3=1\nTeam4=1\nOn2=1\nOn3=1\nOn4=0\n", 3, 1, 1, { 0, 0, 1, -1 }, { 0, 2, 3, 4 } },  // 2v1
+            { "Team2=0\nTeam3=0\nTeam4=1\nOn2=1\nOn3=1\nOn4=1\n", 3, 2, 1, { 0, 0, 0, 1 }, { 0, 2, 3, 4 } },   // 3v1
+            { "Team2=0\nTeam3=1\nTeam4=1\nOn2=0\nOn3=0\nOn4=1\n", 3, 0, 1, { 0, -1, 1, -1 }, { 0, 2, 4, 3 } }, // 1v1
+            { "Partner=0\n", 0, 0, 2, { 0, -1, 1, 1 }, { 0, 2, 3, 4 } },                                     // old settings: 1v2
+            { "Partner=2\n", 2, 0, 3, { 0, 1, 1, 1 }, { 0, 4, 2, 3 } },                                      // old settings: 1v3
+        };
+        char lini[MAX_PATH]; snprintf(lini, sizeof(lini), "%slayout.ini", g_test_dir);
+        for (auto &k : cases) {
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nUnit1=0\nUnit2=2\nUnit3=3\nUnit4=4\n%s", k.keys);
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            CHECK(lc.partner == k.partner && lc.allies == k.a && lc.enemies == k.e);
+            for (int p = 0; p < 4; p++) { CHECK(lc.layout[p] == k.lay[p]); }
+            for (int p = 1; p < 4; p++) {
+                if (k.lay[p] >= 0) { CHECK(lc.unit[p] == k.units[p]); }
+                if (lc.layout[p] != k.lay[p] || (k.lay[p] >= 0 && lc.unit[p] != k.units[p])) printf("  case %s: position %d\n", k.keys, p);
+            }
+        }
+    }
 
     // --- the builder hook, on the real game exe mapped as an image (not run): argv[3]
     if (argc > 3) {
@@ -182,26 +237,16 @@ int main(int argc, char **argv) {
             CHECK(!memcmp(base + RVA_STAGE_AT, SIG_STAGE_AT, sizeof(SIG_STAGE_AT)) && !memcmp(base + RVA_STAGE_OK, SIG_STAGE_OK, sizeof(SIG_STAGE_OK)));   // stage list functions
             CHECK(patch_code(base + RVA_FOURTH, SIG_FOURTH, 6, 0, NOP6, 6, "4th unit") && !memcmp(base + RVA_FOURTH, NOP6, 6));
             write_mem(base + RVA_FOURTH, SIG_FOURTH, 6);
-        }
-    }
 
-    // --- 1v2 with team cost: the partner slot taken out of the bridge's 4 (you in slot 0, partner 1, enemies 2 and 3)
-    {
-        static BYTE o2[SLOT0 + 4 * SLOT_SIZE + 0x200];
-        memset(o2, 0, sizeof(o2));
-        *(DWORD *)(o2 + O_UNIT_COUNT) = 4;
-        for (int i = 0; i < 4; i++) {
-            BYTE *sl = o2 + SLOT0 + i * SLOT_SIZE;
-            sl[0] = i == 0; *(DWORD *)(sl + 0x158) = i; *(DWORD *)(sl + 0x160) = i >= 2; *(DWORD *)(sl + 0x164) = 5000 + i;
-            sl[0x200] = (BYTE)(0x40 + i);   // something else of the slot: moves with it
+            // rematch: the hook on the game's match restart (prologue, relay, trampoline)
+            BYTE *rfn = base + RVA_RESTART;
+            CHECK(!memcmp(rfn, RESTART_PROLOGUE, sizeof(RESTART_PROLOGUE)));
+            CHECK(restart_hook(base));
+            CHECK(rfn[0] == 0xE9 && rfn + 5 + *(int32_t *)(rfn + 1) == g_restart_page);
+            CHECK(*(void **)(g_restart_page + 6) == (void *)tr_restart_detour);
+            CHECK(!memcmp(g_restart_page + 16, RESTART_PROLOGUE, 5) && *(BYTE **)(g_restart_page + 21 + 6) == rfn + 5);
+            write_mem(rfn, RESTART_PROLOGUE, 5); g_restart_hooked = false;
         }
-        LONG fl = g_flips;
-        CHECK(drop_partner(o2) && g_flips == fl + 1 && *(DWORD *)(o2 + O_UNIT_COUNT) == 3);
-        BYTE *s0 = o2 + SLOT0, *s1 = s0 + SLOT_SIZE, *s2 = s1 + SLOT_SIZE;
-        CHECK(s0[0] == 1 && *(DWORD *)(s0 + 0x164) == 5000 && *(DWORD *)(s0 + 0x160) == 0);
-        CHECK(*(DWORD *)(s1 + 0x164) == 5002 && *(DWORD *)(s1 + 0x158) == 1 && *(DWORD *)(s1 + 0x160) == 1 && s1[0x200] == 0x42);
-        CHECK(*(DWORD *)(s2 + 0x164) == 5003 && *(DWORD *)(s2 + 0x158) == 2 && *(DWORD *)(s2 + 0x160) == 1 && s2[0x200] == 0x43);
-        CHECK(!drop_partner(o2));   // 3 units now: left alone
     }
 
     // --- code patches (on a copy of the bytes)
@@ -241,6 +286,85 @@ int main(int argc, char **argv) {
     char sha[65];
     wchar_t dll[MAX_PATH]; swprintf(dll, MAX_PATH, L"%hs", argc > 2 ? argv[2] : "");
     if (argc > 2) { CHECK(sha256_file(dll, sha) && !strcmp(sha, BRIDGE_SHA256)); }
+
+    // --- the diagnostic hook on the bridge's finish, on the shipped bridge mapped as an image (not run)
+    if (argc > 2) {
+        BYTE *br = (BYTE *)LoadLibraryExW(dll, NULL, DONT_RESOLVE_DLL_REFERENCES);
+        CHECK(br != NULL && (BYTE *)GetModuleHandleW(L"training_bridge.dll") == br);
+        if (br) {
+            BYTE *fn = br + BR_FINISH;
+            CHECK(!memcmp(fn, BR_FINISH_PROLOGUE, sizeof(BR_FINISH_PROLOGUE)));
+            CHECK(finish_hook());
+            CHECK(fn[0] == 0xE9 && fn + 5 + *(int32_t *)(fn + 1) == g_finish_page);
+            CHECK(*(void **)(g_finish_page + 6) == (void *)tr_finish_detour);
+            CHECK(!memcmp(g_finish_page + 16, BR_FINISH_PROLOGUE, 5) && *(BYTE **)(g_finish_page + 21 + 6) == fn + 5);
+            CHECK(finish_hook());   // once
+            // 1v3 result screen: the 2-per-team checks off and back on
+            CHECK(!memcmp(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK)));
+            team_check(true);
+            BYTE nop22[22]; memset(nop22, 0x90, sizeof(nop22));
+            CHECK(g_team_check_off && !memcmp(br + BR_TEAM_CHECK, nop22, 22) && br[BR_TEAM_CHECK - 6] == 0x0f && br[BR_TEAM_CHECK + 22] == 0x44);
+            team_check(false);
+            CHECK(!g_team_check_off && !memcmp(br + BR_TEAM_CHECK, SIG_TEAM_CHECK, sizeof(SIG_TEAM_CHECK)));
+            // 1v2 rematch: the phase 3 / 0 errors jumps off and back on
+            CHECK(!memcmp(br + BR_REMATCH_CHECK, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK)));
+            rematch_check(true);
+            BYTE *rc = br + BR_REMATCH_CHECK;
+            CHECK(g_rematch_check_off && rc[7] == 0x90 && rc[8] == 0x90 && rc[16] == 0x90 && rc[17] == 0x90 && !memcmp(rc, SIG_REMATCH_CHECK, 7) &&
+                  !memcmp(rc + 9, SIG_REMATCH_CHECK + 9, 7));
+            rematch_check(false);
+            CHECK(!g_rematch_check_off && !memcmp(rc, SIG_REMATCH_CHECK, sizeof(SIG_REMATCH_CHECK)));
+            // 1v2 result rows: the stub on the "4 rows?" check
+            CHECK(!memcmp(br + BR_ROWS_CHECK, SIG_ROWS_CHECK, sizeof(SIG_ROWS_CHECK)));
+            rows_hook(true);
+            BYTE *ra = br + BR_ROWS_CHECK;
+            CHECK(g_rows_hooked && ra[0] == 0xE9 && ra + 5 + *(int32_t *)(ra + 1) == g_rows_page && ra[5] == 0x90 && ra[7] == 0x90);
+            CHECK(*(void **)(g_rows_page + 23) == (void *)tr_payload_fix);
+            CHECK(*(BYTE **)(g_rows_page + 31 + 25 + 6) == br + BR_ROWS_OK && *(BYTE **)(g_rows_page + 31 + 25 + 14 + 6) == br + BR_ROWS_BAD);
+            { char sp[MAX_PATH]; snprintf(sp, sizeof(sp), "%sstub.bin", g_test_dir); FILE *sf = fopen(sp, "wb"); fwrite(g_rows_page, 1, 31 + 25 + 28, sf); fclose(sf); }
+            CHECK(br[BR_PLACE_CHECK + 4] == 0x90 && br[BR_PLACE_CHECK + 9] == 0x90 && !memcmp(br + BR_PLACE_CHECK, SIG_PLACE_CHECK, 4));
+            rows_hook(false);
+            CHECK(!g_rows_hooked && !memcmp(br + BR_ROWS_CHECK, SIG_ROWS_CHECK, sizeof(SIG_ROWS_CHECK)));
+            CHECK(!memcmp(br + BR_PLACE_CHECK, SIG_PLACE_CHECK, sizeof(SIG_PLACE_CHECK)));
+        }
+    }
+
+    // --- result rows: made-up rows up to 4, filling the teams to 2 and 2 (rows at frame+0x2F0, local key at
+    // frame+0xC0, count at out+0x28)
+    {
+        static BYTE frame[0x600], out[0x40];
+        LONG was = g_flip_partner, wout = g_layout_out;
+        // 1v2: you (0, team 0) + enemies 2 and 3 -> a row for member 1 on your team
+        memset(frame, 0, sizeof(frame)); memset(out, 0, sizeof(out));
+        BYTE *rows = frame + 0x2f0;
+        ULONG64 keys[3] = { 0, 2, 3 }; DWORD teams[3] = { 0, 1, 1 };
+        for (int i = 0; i < 3; i++) {
+            *(ULONG64 *)(rows + i * 0xa0) = keys[i]; *(DWORD *)(rows + i * 0xa0 + 0xc) = 7000 + i; *(DWORD *)(rows + i * 0xa0 + 0x10) = teams[i];
+            rows[i * 0xa0 + 0x40] = (BYTE)(0x60 + i);
+        }
+        *(ULONG64 *)(frame + 0xc0) = 0;   // you are member 0
+        *(DWORD *)(out + 0x28) = 3;
+        g_flip_partner = 1; g_layout_out = 1;
+        tr_payload_fix(frame, out);
+        BYTE *r3 = rows + 3 * 0xa0;
+        CHECK(*(DWORD *)(out + 0x28) == 4 && *(ULONG64 *)r3 == 1 && *(DWORD *)(r3 + 0x10) == 0 && r3[0x40] == 0x61);   // a copy of a CPU row
+        CHECK(*(DWORD *)(r3 + 0xc) != 0);
+        // 1v1: you (0, team 0) + enemy 3 -> a row on your team (member 1), then one on the enemy team (member 2)
+        memset(frame, 0, sizeof(frame)); memset(out, 0, sizeof(out));
+        *(ULONG64 *)rows = 0; *(DWORD *)(rows + 0x10) = 0; *(DWORD *)(rows + 0xc) = 7000;
+        *(ULONG64 *)(rows + 0xa0) = 3; *(DWORD *)(rows + 0xa0 + 0x10) = 1; *(DWORD *)(rows + 0xa0 + 0xc) = 7003;
+        *(DWORD *)(out + 0x28) = 2; g_layout_out = 2;
+        tr_payload_fix(frame, out);
+        CHECK(*(DWORD *)(out + 0x28) == 4);
+        CHECK(*(ULONG64 *)(rows + 2 * 0xa0) == 1 && *(DWORD *)(rows + 2 * 0xa0 + 0x10) == 0);
+        CHECK(*(ULONG64 *)(rows + 3 * 0xa0) == 2 && *(DWORD *)(rows + 3 * 0xa0 + 0x10) == 1);
+        // nothing taken out (1v3 / 3v1): nothing
+        *(DWORD *)(out + 0x28) = 3; g_layout_out = 0;
+        memset(rows + 3 * 0xa0, 0, 0xa0); memset(rows + 2 * 0xa0, 0, 0xa0);
+        tr_payload_fix(frame, out);
+        CHECK(*(DWORD *)(out + 0x28) == 3 && *(ULONG64 *)(rows + 3 * 0xa0) == 0);
+        g_flip_partner = was; g_layout_out = wout;
+    }
 
     printf(fails ? "%d FAILED\n" : "all training tests passed\n", fails);
     return fails ? 1 : 0;
