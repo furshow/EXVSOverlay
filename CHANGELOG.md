@@ -5,17 +5,17 @@ section of the released version as the release notes.
 
 ## [Unreleased]
 ### Custom Training
-- **5 units**: 1v4, 2v3, 3v2 and 4v1, from the launcher's 5th CPU slot (`Unit5` / `Cpu5` / `Ex5` / `Team5` / `On5`
-  in `Training\training.ini`). The game's training list holds 4 units, so the bridge runs 4 and the overlay hands
-  the match a copy of the list with a 5th entry (game 0x7A0774): a copy of a CPU of the same team with the 5th
-  slot's unit, CPU behavior and EX. Three places made for 4 are adjusted while it's on: the battle log upload
+- **5 and 6 units**: 1v4, 2v3, 3v2, 4v1, and 1v5, 2v4, 3v3, 4v2, 5v1, from the launcher's CPU slots 5 and 6
+  (`Unit5..6` / `Cpu5..6` / `Ex5..6` / `Team5..6` / `On5..6` in `Training\training.ini`). The game's training list
+  holds 4 units, so the bridge runs 4 and the overlay hands the match a copy of the list with 1-2 more entries
+  (game 0x7A0774): each a copy of a CPU of the same team with that slot's unit, CPU behavior and EX. Three places made for 4 are adjusted while it's on: the battle log upload
   keeps 4 rows (it overflowed its stack and closed the game), the bridge's result screen keeps the first 4 rows,
   and the game's result builder skips the player its 4-row table doesn't have. The result screen shows you and
-  the first 3 others; the rematch stays a 5-unit match. Tried in game as 1v4 (match, result screen, rematch);
-  2v3, 3v2 and 4v1 not yet.
-- With 4 CPUs on, the 5th is the last enemy (the last ally in 4v1); with fewer, the launcher's slot 5 can stand
-  in for a slot that's off.
-- While the 5th unit is on, a stack overrun or exception in the game is logged (where, and the call chain) before
+  the first 3 others; the rematch keeps all the units. 5 units tried in game (1v4 and others: match, result
+  screen, rematch); 6 units not yet.
+- The bridge gets up to 2 of your CPUs and at least one enemy (the first ones, in slot order); the other CPUs are
+  the extra units. With 3 CPUs or fewer, slots 5-6 can stand in for slots that are off.
+- While extra units are on, a stack overrun or exception in the game is logged (where, and the call chain) before
   the game ends, to find any other 4-unit limit.
 
 ## [1.2.1] - 2026-11-21
