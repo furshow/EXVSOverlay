@@ -206,6 +206,65 @@ int main(int argc, char **argv) {
                 if (k.lay[p] >= 0) { CHECK(lc.unit[p] == k.units[p]); }
                 if (lc.layout[p] != k.lay[p] || (k.lay[p] >= 0 && lc.unit[p] != k.units[p])) printf("  case %s: position %d\n", k.keys, p);
             }
+            CHECK(lc.nextra == 0);   // 4 units at most
+        }
+        // 5 CPU slots (launcher 1.3.2+): the 5th unit, and slot 5 standing in for a slot that's off
+        struct F { const char *keys; int a, e; int lay[4]; int units[4]; int f5, u5, partner, f6 = -1, u6 = 0; } five[] = {
+            { "Team2=1\nTeam3=1\nTeam4=1\nTeam5=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\n", 0, 4, { 0, 1, 1, 1 }, { 0, 4, 2, 3 }, 1, 5, 3 },   // 1v4
+            { "Team2=0\nTeam3=1\nTeam4=1\nTeam5=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\n", 1, 3, { 0, 0, 1, 1 }, { 0, 2, 3, 4 }, 1, 5, 3 },   // 2v3
+            { "Team2=0\nTeam3=0\nTeam4=1\nTeam5=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\n", 2, 2, { 0, 0, 0, 1 }, { 0, 2, 3, 4 }, 1, 5, 3 },   // 3v2
+            { "Team2=0\nTeam3=0\nTeam4=0\nTeam5=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\n", 3, 1, { 0, 0, 0, 1 }, { 0, 2, 3, 5 }, 0, 4, 3 },   // 4v1
+            { "Team2=0\nTeam3=1\nTeam4=1\nTeam5=1\nOn2=1\nOn3=0\nOn4=1\nOn5=1\n", 1, 2, { 0, 0, 1, 1 }, { 0, 2, 4, 5 }, -1, 0, 1 },  // slot 5 for slot 3
+            // 6 units (slot 6)
+            { "Team2=1\nTeam3=1\nTeam4=1\nTeam5=1\nTeam6=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\nOn6=1\n", 0, 5, { 0, 1, 1, 1 }, { 0, 4, 2, 3 }, 1, 5, 3, 1, 6 },   // 1v5
+            { "Team2=0\nTeam3=0\nTeam4=1\nTeam5=1\nTeam6=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\nOn6=1\n", 2, 3, { 0, 0, 0, 1 }, { 0, 2, 3, 4 }, 1, 5, 3, 1, 6 },   // 3v3
+            { "Team2=0\nTeam3=0\nTeam4=0\nTeam5=0\nTeam6=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\nOn6=1\n", 4, 1, { 0, 0, 0, 1 }, { 0, 2, 3, 6 }, 0, 4, 3, 0, 5 },   // 5v1
+            { "Team2=1\nTeam3=0\nTeam4=1\nTeam5=0\nTeam6=1\nOn2=1\nOn3=1\nOn4=1\nOn5=1\nOn6=1\n", 2, 3, { 0, 0, 0, 1 }, { 0, 3, 5, 2 }, 1, 4, 3, 1, 6 },   // 3v3 mixed slots
+            { "Team2=1\nTeam3=1\nTeam4=1\nTeam5=1\nTeam6=1\nOn2=0\nOn3=1\nOn4=1\nOn5=1\nOn6=1\n", 0, 4, { 0, 1, 1, 1 }, { 0, 5, 3, 4 }, 1, 6, 3 },         // 1v4 with slot 2 out
+        };
+        for (auto &k : five) {
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nUnit1=0\nUnit2=2\nUnit3=3\nUnit4=4\nUnit5=5\nCpu5=4\nEx5=2\nUnit6=6\n%s", k.keys);
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            int nx = (k.f5 >= 0) + (k.f6 >= 0);
+            CHECK(lc.partner == k.partner && lc.allies == k.a && lc.enemies == k.e && lc.nextra == nx);
+            if (k.f5 >= 0) { CHECK(lc.extra_team[0] == k.f5); }
+            if (k.f6 >= 0) { CHECK(lc.extra_team[1] == k.f6 && lc.unit[5] == k.u6); }
+            for (int p = 0; p < 4; p++) { CHECK(lc.layout[p] == k.lay[p]); }
+            for (int p = 1; p < 4; p++) { CHECK(lc.unit[p] == k.units[p]); }
+            if (k.f5 >= 0) { CHECK(lc.unit[4] == k.u5); }
+            if (k.u5 == 5) { CHECK(lc.level[4] == 4 && lc.ex[4] == 2); }
+            if (lc.partner != k.partner || lc.allies != k.a || lc.enemies != k.e || lc.nextra != nx || (k.f5 >= 0 && lc.unit[4] != k.u5))
+                printf("  5-slot case %s: partner %d a %d e %d extras %d unit5 %d unit6 %d\n", k.keys, lc.partner, lc.allies, lc.enemies, lc.nextra, lc.unit[4], lc.unit[5]);
+            for (int p = 1; p < 4; p++) if (lc.unit[p] != k.units[p] || lc.layout[p] != k.lay[p]) printf("  5-slot case %s: position %d unit %d layout %d\n", k.keys, p, lc.unit[p], lc.layout[p]);
+        }
+        // 7-10 units (slots 7-10): 5v5, 1v9, 9v1; unit of slot n = n, the extras in slot order after the bridge's 3
+        struct T { const char *teams; int a, e; int units[4]; int nx; int xu[6]; int xt[6]; } ten[] = {
+            { "0000011111", 4, 5, { 0, 2, 3, 6 }, 6, { 4, 5, 7, 8, 9, 10 }, { 0, 0, 1, 1, 1, 1 } },   // 5v5: 2-5 yours, 6-10 enemy
+            { "0111111111", 0, 9, { 0, 4, 2, 3 }, 6, { 5, 6, 7, 8, 9, 10 }, { 1, 1, 1, 1, 1, 1 } },   // 1v9
+            { "0000000001", 8, 1, { 0, 2, 3, 10 }, 6, { 4, 5, 6, 7, 8, 9 }, { 0, 0, 0, 0, 0, 0 } },   // 9v1
+        };
+        for (auto &k : ten) {
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nUnit1=0\n");
+            for (int i = 2; i <= 10; i++) fprintf(lf, "Unit%d=%d\nTeam%d=%c\nOn%d=1\n", i, i, i, k.teams[i - 1], i);
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            CHECK(lc.partner == 3 && lc.allies == k.a && lc.enemies == k.e && lc.nextra == k.nx);
+            for (int p = 1; p < 4; p++) { CHECK(lc.unit[p] == k.units[p]); }
+            for (int x = 0; x < k.nx; x++) { CHECK(lc.unit[4 + x] == k.xu[x] && lc.extra_team[x] == k.xt[x]); }
+            if (lc.allies != k.a || lc.enemies != k.e || lc.nextra != k.nx)
+                printf("  10-slot case %s: a %d e %d extras %d\n", k.teams, lc.allies, lc.enemies, lc.nextra);
+            for (int p = 1; p < 4 + lc.nextra; p++) if (p >= 4 ? lc.unit[p] != k.xu[p - 4] : lc.unit[p] != k.units[p]) printf("  10-slot case %s: position %d unit %d\n", k.teams, p, lc.unit[p]);
+        }
+        {   // 4v3: slots 2-4 yours, 5-7 enemy, 8-10 out
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nUnit1=0\n");
+            for (int i = 2; i <= 10; i++) fprintf(lf, "Unit%d=%d\nTeam%d=%d\nOn%d=%d\n", i, i, i, i >= 5, i, i <= 7);
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            CHECK(lc.allies == 3 && lc.enemies == 3 && lc.nextra == 3 && lc.unit[4] == 4 && lc.extra_team[0] == 0 && lc.unit[5] == 6 && lc.extra_team[1] == 1);
         }
     }
 
@@ -246,7 +305,105 @@ int main(int argc, char **argv) {
             CHECK(*(void **)(g_restart_page + 6) == (void *)tr_restart_detour);
             CHECK(!memcmp(g_restart_page + 16, RESTART_PROLOGUE, 5) && *(BYTE **)(g_restart_page + 21 + 6) == rfn + 5);
             write_mem(rfn, RESTART_PROLOGUE, 5); g_restart_hooked = false;
+
+            // 1v4 experiment: the match's list pointer (lea rax,[rcx+510h]) goes through the relay
+            BYTE *lea = base + RVA_LIST_LEA;
+            CHECK(!memcmp(lea, SIG_LIST_LEA, sizeof(SIG_LIST_LEA)));
+            CHECK(list_hook(base));
+            CHECK(lea[0] == 0xE9 && lea + 5 + *(int32_t *)(lea + 1) == g_list_page && lea[5] == 0x90 && lea[6] == 0x90);
+            CHECK(!memcmp(g_list_page, SIG_LIST_LEA, 7) && g_list_page[7] == 0x49 && g_list_page[8] == 0xbb &&
+                  *(void **)(g_list_page + 9) == (void *)&g_ext_ptr);
+            CHECK(g_list_page[17] == 0x4d && g_list_page[20] == 0x4d && g_list_page[23] == 0x74 && g_list_page[24] == 0x03 &&
+                  g_list_page[25] == 0x4c && *(BYTE **)(g_list_page + 28 + 6) == base + RVA_LIST_BACK);
+            {   // the relay's code, run on its own: rax = rcx+510h, or g_ext_ptr when set
+                static const BYTE ret = 0xc3;
+                BYTE *x = (BYTE *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                memcpy(x, g_list_page, 28); x[28] = ret;
+                typedef ULONG_PTR (*Pick)(ULONG_PTR);
+                CHECK(((Pick)x)(0x1000) == 0x1510);
+                g_ext_ptr = (LONG64)g_ext;
+                CHECK(((Pick)x)(0x1000) == (ULONG_PTR)g_ext);
+                g_ext_ptr = 0;
+                VirtualFree(x, 0, MEM_RELEASE);
+            }
+            for (const CapPatch &cp : CAP_PATCHES) CHECK(!memcmp(base + cp.rva, cp.to, 7));
+            list_unhook(base);
+            for (const CapPatch &cp : CAP_PATCHES) CHECK(!memcmp(base + cp.rva, cp.sig, 7));
+            CHECK(g_gs_hooked && base[RVA_GS_FAIL] == 0xE9 && *(void **)(g_gs_page + 6) == (void *)tr_gs_detour && !memcmp(g_gs_page + 16, GS_FAIL_PROLOGUE, 5));
+            write_mem(base + RVA_GS_FAIL, GS_FAIL_PROLOGUE, 5); g_gs_hooked = false;
+            CHECK(!memcmp(lea, SIG_LIST_LEA, sizeof(SIG_LIST_LEA)));
+            if (g_x5_veh) { RemoveVectoredExceptionHandler(g_x5_veh); g_x5_veh = NULL; }
         }
+    }
+
+    // --- 1v4 experiment: the result rows keep 4 of the 5
+    {
+        static BYTE frame[0x800], out[0x40];
+        *(DWORD *)(out + 0x28) = 5; g_x5_rows = 1;
+        tr_payload_fix(frame, out);
+        CHECK(*(DWORD *)(out + 0x28) == 4);
+        *(DWORD *)(out + 0x28) = 4; tr_payload_fix(frame, out);
+        CHECK(*(DWORD *)(out + 0x28) == 4);
+        g_x5_rows = 0;
+    }
+
+    // --- 1v4 experiment: the 5-entry copy of a 1v3 training's list
+    {
+        static BYTE obj[0x1400];
+        memset(obj, 0, sizeof(obj));
+        BYTE *list = obj + O_LIST;
+        DWORD teams[4] = { 0, 1, 1, 1 }, units[4] = { 101, 202, 303, 404 };
+        for (int i = 0; i < 4; i++) {
+            BYTE *e = list + ENTRY0 + i * ENTRY_SIZE;
+            CHECK(e + 0x58 == obj + SLOT0 + i * SLOT_SIZE);   // the slot view the rest of the code uses
+            *(DWORD *)e = 0x555043;                           // "CPU"
+            e[0x58] = i == 0;
+            *(ULONG64 *)(e + 0x1b0) = i;
+            *(DWORD *)(e + 0x1b8) = teams[i];
+            *(DWORD *)(e + 0x1bc) = units[i];
+            *(DWORD *)(e + 0x1c4) = 7;                        // a CPU setting
+        }
+        CHECK(list + LIST_COUNT == obj + O_UNIT_COUNT);
+        *(DWORD *)(list + LIST_COUNT) = 4;
+        *(DWORD *)(list + 0xcd4) = 0x1234;                    // the stage
+        memset(&g_x5_cfg, 0, sizeof(g_x5_cfg));
+        CHECK(!build_extras(obj));                            // no extra unit in the setup
+        g_x5_cfg.nextra = 1; g_x5_cfg.extra_team[0] = 1; g_x5_cfg.unit[4] = 555; g_x5_cfg.level[4] = 4; g_x5_cfg.ex[4] = 2;
+        CHECK(build_extras(obj));
+        BYTE *e5 = g_ext + LIST_COUNT;
+        CHECK(*(DWORD *)(g_ext + LIST_COUNT) == 5 && *(DWORD *)(g_ext + 0xcd4) == 0x1234);
+        CHECK(*(ULONG64 *)(e5 + 0x1b0) == 4 && *(DWORD *)(e5 + 0x1b8) == 1 && *(DWORD *)(e5 + 0x1bc) == 555);
+        CHECK(*(DWORD *)(e5 + 0x1c0) == 2 && *(DWORD *)(e5 + 0x1c4) == CPU_BEHAVIOR[4][1] && *(DWORD *)(e5 + 0x1c8) == CPU_BEHAVIOR[4][2] &&
+              *(DWORD *)(e5 + 0x1cc) == CPU_BEHAVIOR[4][0]);
+        CHECK(!memcmp(g_ext, list, LIST_COUNT));             // the 4 entries as they are
+        // a 6th: both extras, the 6th a whole entry after the 5th (key 5); count 6 on the 5th's name
+        g_x5_cfg.nextra = 2; g_x5_cfg.extra_team[1] = 1; g_x5_cfg.unit[5] = 666; g_x5_cfg.level[5] = 2; g_x5_cfg.ex[5] = 1;
+        CHECK(build_extras(obj));
+        BYTE *e6 = g_ext + ENTRY0 + 5 * ENTRY_SIZE;
+        CHECK(*(DWORD *)(g_ext + LIST_COUNT) == 6 && *(DWORD *)(g_ext + 0xcd4) == 0x1234 && *(DWORD *)(e5 + 0x1bc) == 555);
+        CHECK(*(ULONG64 *)(e6 + 0x1b0) == 5 && *(DWORD *)(e6 + 0x1b8) == 1 && *(DWORD *)(e6 + 0x1bc) == 666 && *(DWORD *)(e6 + 0x1c0) == 1);
+        CHECK(*(DWORD *)e6 == 0x555043 && e6[0x58] == 0);   // a whole copy of an enemy CPU entry ("CPU", not human)
+        CHECK(*(DWORD *)(e6 + 0x1c4) == CPU_BEHAVIOR[2][1] && *(DWORD *)(e6 + 0x1cc) == CPU_BEHAVIOR[2][0]);
+        // 10 units: 6 extras, keys 4-9, count 10, each a whole copy past the 5th
+        for (int x = 2; x < 6; x++) { g_x5_cfg.extra_team[x] = x & 1; g_x5_cfg.unit[4 + x] = 700 + x; g_x5_cfg.level[4 + x] = 3; g_x5_cfg.ex[4 + x] = 0; }
+        g_x5_cfg.nextra = 6;
+        CHECK(build_extras(obj));
+        CHECK(*(DWORD *)(g_ext + LIST_COUNT) == 10 && *(DWORD *)(g_ext + 0xcd4) == 0x1234);
+        for (int x = 1; x < 6; x++) {
+            BYTE *ex = g_ext + ENTRY0 + (4 + x) * ENTRY_SIZE;
+            CHECK(*(ULONG64 *)(ex + 0x1b0) == (ULONG64)(4 + x) && *(DWORD *)ex == 0x555043 && ex[0x58] == 0);
+            CHECK(*(DWORD *)(ex + 0x1bc) == (x == 1 ? 666u : 700u + x));
+        }
+        CHECK(*(DWORD *)(g_ext + ENTRY0 + 9 * ENTRY_SIZE + 0x1b8) == 1 && *(DWORD *)(g_ext + ENTRY0 + 8 * ENTRY_SIZE + 0x1b8) == 0);
+        g_x5_cfg.nextra = 7;
+        CHECK(!build_extras(obj));                            // 10 units at most
+        g_x5_cfg.nextra = 1;
+        g_x5_cfg.extra_team[0] = 0; g_x5_cfg.unit[4] = -1; g_x5_cfg.npool = 0;   // on your team; random with no pool: the copy's unit
+        teams[1] = 0; *(DWORD *)(list + ENTRY0 + ENTRY_SIZE + 0x1b8) = 0;   // 2v2 with the 5th on your team (3v2)
+        CHECK(build_extras(obj) && *(DWORD *)(e5 + 0x1b8) == 0 && *(DWORD *)(e5 + 0x1bc) == 202);   // copy of your ally
+        *(DWORD *)(list + LIST_COUNT) = 3;
+        CHECK(!build_extras(obj));                            // only from 4 units
+        g_x5_cfg.nextra = 0;
     }
 
     // --- code patches (on a copy of the bytes)

@@ -3,6 +3,21 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.2.2] - 2026-11-22
+### Custom Training
+- **5 to 10 units**: 1v4 ... 4v1, 1v5, 3v3, and up to 1v9, 5v5 and 9v1, from the launcher's CPU slots 5 to 10
+  (`Unit5..10` / `Cpu5..10` / `Ex5..10` / `Team5..10` / `On5..10` in `Training\training.ini`). The game's training
+  list holds 4 units, so the bridge runs 4 and the overlay hands the match a copy of the list with 1-6 more entries
+  (game 0x7A0774): each a copy of a CPU of the same team with that slot's unit, CPU behavior and EX. Three
+  places made for 4 are adjusted while it's on: the battle log upload keeps 4 rows (it overflowed its stack and
+  closed the game), the bridge's result screen keeps the first 4 rows, and the game's result builder skips the
+  players its 4-row table doesn't have. The result screen shows you and the first 3 others; the rematch keeps all
+  the units. Tried in game from 5 to 10 units (match, result screen, rematch).
+- The bridge gets up to 2 of your CPUs and at least one enemy (the first ones, in slot order); the other CPUs are
+  the extra units. With 3 CPUs or fewer, slots 5-10 can stand in for slots that are off.
+- While extra units are on, a stack overrun or exception in the game is logged (where, and the call chain) before
+  the game ends, to find any other 4-unit limit.
+
 ## [1.2.1] - 2026-11-21
 ### Custom Training
 - **Any layout up to 4 units**: 1v1, 1v2, 2v1, 1v3, 2v2 and 3v1, from the launcher's per-CPU teams (`Team2..4` /

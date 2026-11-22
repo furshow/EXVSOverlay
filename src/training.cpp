@@ -34,6 +34,8 @@ enum : DWORD {
     O_POOL_COUNT = 272, O_POOL = 280, O_RANDOM_STAGE = 2328, O_SAVE_MASTERY = 2332, O_CONSUME_COST = 2364,
 };
 
+static const int T_MAXU = 10;   // units in a match at most (the bridge's 4 + 6 extra units)
+
 struct Config {
     bool enabled, random_stage, consume_cost;
     // 1 = 2v2 (bridge), 0 = 1v2 and 2 = 1v3 (without team cost: the game's own training, see "solo" below),
@@ -41,9 +43,11 @@ struct Config {
     int partner;
     int layout[4];          // per bridge position (0 = you): 0 your team, 1 enemy team, -1 taken out
     int allies, enemies;    // CPUs on your team / on the enemy team
-    int seq, unit[4], level[4], ex[4];   // per bridge position (read_config puts the launcher's slots there)
+    // per bridge position (read_config puts the launcher's slots there); index 4-9 = the extra units (5th-10th)
+    int seq, unit[T_MAXU], level[T_MAXU], ex[T_MAXU];
     int pool[B_POOL_MAX], npool;
-    int slot_pool[4][256], nslot[4];   // random by category (unit <= -2): the overlay draws one per match
+    int slot_pool[T_MAXU][256], nslot[T_MAXU];   // random by category (unit <= -2): the overlay draws one per match
+    int nextra, extra_team[T_MAXU - 4];   // units past the bridge's 4 (0-6) and their teams (0 yours, 1 enemy)
 };
 
 static char g_tdir[MAX_PATH];   // <game>\Training\ (trailing backslash)
@@ -252,7 +256,7 @@ static int random_below(int n) {   // 0..n-1
 }
 static int random_ex(void) { return random_below(3); }
 // something the overlay draws itself (random EX, random unit by category): drawn again after every match
-static bool any_random_ex(const Config &c) { for (int i = 0; i < 4; i++) if (c.ex[i] == EX_RANDOM || c.unit[i] < -1) return true; return false; }
+static bool any_random_ex(const Config &c) { for (int i = 0; i < 4 + c.nextra; i++) if (c.ex[i] == EX_RANDOM || c.unit[i] < -1) return true; return false; }
 
 static DWORD submit(const Config &c) {
     DWORD s = begin_write();
@@ -313,6 +317,50 @@ static void arrange(Config *c, const int team[4], const int on[4]) {
     c->allies = a; c->enemies = e;
     bool plain = a == 1 && e == 2;   // positions 1 / 2 / 3 = ally / enemy / enemy: the bridge's own 2v2
     c->partner = plain ? 1 : a == 0 && e == 2 ? 0 : a == 0 && e == 3 ? 2 : 3;
+    if (c->nextra) {   // 5-10 units: always the bridge's 4 rearranged, plus the extra units
+        c->partner = 3;
+        for (int k = 0; k < c->nextra; k++) (c->extra_team[k] ? c->enemies : c->allies)++;
+    }
+}
+
+// The launcher's 9 CPU slots (2-10, index 1-9) -> the bridge's 3 CPU slots (index 1-3) + up to 6 extra units
+// (index 4-9, made by the game from a copy of the list, see "5-10 units" below). With 4 CPUs or more on, the bridge
+// gets up to 2 allies and at least one enemy (the first ones, in slot order) and the rest are the extra units. With
+// 3 or fewer, the slots that are on move to the front (slots 5-10 can stand in for slots that are off).
+static void pick_extras(Config *c, int team[T_MAXU], int on[T_MAXU]) {
+    int allies = 0, enemies = 0;
+    for (int i = 1; i < T_MAXU; i++) if (on[i]) (team[i] ? enemies : allies)++;
+    int base_a = allies < 2 ? allies : 2, base_e = 3 - base_a;
+    bool extra[T_MAXU] = {};
+    if (allies + enemies > 3)
+        for (int i = 1, a = 0, e = 0; i < T_MAXU; i++) {
+            if (!on[i]) continue;
+            if (team[i] ? e++ >= base_e : a++ >= base_a) extra[i] = true;
+        }
+    int order[T_MAXU], n = 0;
+    order[n++] = 0;
+    for (int i = 1; i < T_MAXU; i++) if (on[i] && !extra[i]) order[n++] = i;
+    int first_off = n;
+    for (int i = 1; i < T_MAXU; i++) if (!on[i]) order[n++] = i;   // the bridge's positions left (a unit is needed there)
+    int nx = 0;
+    for (int i = 1; i < T_MAXU; i++) if (extra[i]) nx++;
+    if (nx) {   // the bridge's 3 CPU slots are all on: the extras go right after them (index 4-9)
+        n = 4;
+        for (int i = 1; i < T_MAXU; i++) if (extra[i]) order[n++] = i;
+        for (int i = 1; i < T_MAXU; i++) if (!on[i]) order[n++] = i;
+    }
+    (void)first_off;
+    Config o = *c;
+    int t[T_MAXU], w[T_MAXU];
+    for (int p = 0; p < T_MAXU; p++) {
+        int k = order[p];
+        c->unit[p] = o.unit[k]; c->level[p] = o.level[k]; c->ex[p] = o.ex[k];
+        c->nslot[p] = o.nslot[k]; memcpy(c->slot_pool[p], o.slot_pool[k], sizeof(c->slot_pool[p]));
+        t[p] = team[k]; w[p] = on[k];
+    }
+    memcpy(team, t, sizeof(t)); memcpy(on, w, sizeof(w));
+    c->nextra = nx;
+    for (int k = 0; k < nx; k++) c->extra_team[k] = team[4 + k];
 }
 
 static bool read_config(const char *ini, Config *c) {
@@ -322,7 +370,7 @@ static bool read_config(const char *ini, Config *c) {
     c->random_stage = GetPrivateProfileIntA("Training", "RandomStage", 0, ini) != 0;
     c->consume_cost = GetPrivateProfileIntA("Training", "ConsumeCost", 1, ini) != 0;
     char k[16], v[32];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < T_MAXU; i++) {   // slots 5-10 (index 4-9): the extra units (launcher 1.3.2+)
         snprintf(k, sizeof(k), "Unit%d", i + 1); GetPrivateProfileStringA("Training", k, "-1", v, sizeof(v), ini); c->unit[i] = atoi(v);
         // CPU behavior (bridge "level"): 0 stop, 1 easy, 2 normal, 3 hard, 4 extreme, 5 walk, 6 evade, 7-9 low/mid/high jump
         snprintf(k, sizeof(k), "Cpu%d", i + 1); c->level[i] = clampi(GetPrivateProfileIntA("Training", k, i == 1 ? 2 : 3, ini), 0, 9);
@@ -355,19 +403,21 @@ static bool read_config(const char *ini, Config *c) {
     for (int i = 0; i < c->npool; i++) if (!w || c->pool[w - 1] != c->pool[i]) c->pool[w++] = c->pool[i];
     c->npool = w;
 
-    // teams: Team<n> (0 yours, 1 enemy) and On<n> for the CPU slots 2-4 (launcher 1.3.1+); older settings only
-    // have Partner (1 ally, 0 off, 2 enemy) for slot 2, with slots 3 and 4 the enemies
-    int team[4] = { 0, 0, 1, 1 }, on[4] = { 1, 1, 1, 1 };
+    // teams: Team<n> (0 yours, 1 enemy) and On<n> for the CPU slots 2-10 (launcher 1.3.1+, slots 5-10 1.3.2+); older
+    // settings only have Partner (1 ally, 0 off, 2 enemy) for slot 2, with slots 3 and 4 the enemies
+    int team[T_MAXU], on[T_MAXU];
+    for (int i = 0; i < T_MAXU; i++) { team[i] = i >= 2; on[i] = i < 4; }
     char probe[8];
     if (GetPrivateProfileStringA("Training", "Team2", "", probe, sizeof(probe), ini)) {
-        for (int i = 1; i < 4; i++) {
+        for (int i = 1; i < T_MAXU; i++) {
             snprintf(k, sizeof(k), "Team%d", i + 1); team[i] = GetPrivateProfileIntA("Training", k, i == 1 ? 0 : 1, ini) ? 1 : 0;
-            snprintf(k, sizeof(k), "On%d", i + 1); on[i] = GetPrivateProfileIntA("Training", k, 1, ini) ? 1 : 0;
+            snprintf(k, sizeof(k), "On%d", i + 1); on[i] = GetPrivateProfileIntA("Training", k, i < 4, ini) ? 1 : 0;
         }
     } else {
         int pm = clampi(GetPrivateProfileIntA("Training", "Partner", 1, ini), 0, 2);
         on[1] = pm != 0; team[1] = pm == 2;
     }
+    pick_extras(c, team, on);
     arrange(c, team, on);
     return true;
 }
@@ -846,9 +896,19 @@ static BYTE *g_rows_page;
 static bool g_rows_hooked;
 static volatile LONG g_rows_fixed;
 
+static volatile LONG g_x5_rows;   // 5-10 units: the result screen keeps the first 4 rows
+static volatile LONG g_x5_any, g_x5_logs;   // 5-10 units: log every exception during the result payload (the bridge's __except = ScoreErrors 9)
 extern "C" void tr_payload_fix(BYTE *frame, BYTE *out) {
-    if (!g_flip_partner || !g_layout_out) return;
     DWORD *count = (DWORD *)(out + 0x28);
+    if (g_x5_rows && *count > 4) {   // 5-10 units: the extra units were counted but not copied (4 rows only): keep the 4 there are
+        ov_log("training: 5-10 units: result rows: %lu players, the result screen shows the first 4", *count);
+        *count = 4;
+        InterlockedIncrement(&g_rows_fixed);
+        InterlockedExchange(&g_x5_logs, 0);
+        InterlockedExchange(&g_x5_any, 1);
+        return;
+    }
+    if (!g_flip_partner || !g_layout_out) return;
     if (*count < 2 || *count >= 4) return;
     BYTE *rows = frame + 0x2f0;
     ULONG64 local = *(ULONG64 *)(frame + 0xc0);
@@ -970,15 +1030,235 @@ static RestartFn g_restart_tramp;
 static BYTE *g_restart_page;
 static bool g_restart_hooked;
 
+// ---- 5-10 units (1v4 ... 1v9, 3v3, 5v5 ...): the launcher's CPU slots past 4 units -----------------------------
+// The training's entry list (training object +0x510: header 8 bytes, 4 entries of 0x2E0 from +8, count +0xB88,
+// more list fields +0xB8C..+0xCE0, the stage at +0xCD4) holds 4 entries, the game's limit. The match scene
+// (ctor game 0x859580, made only by game 0x7A0710) gets a POINTER to that list (0x7A0774: lea rax,[rcx+510h])
+// and copies its entries into a std::map keyed by member. The overlay hands it a copy with 1-6 more entries: the
+// 5th's first 0x158 bytes are the list's own fields (the count lands on its name), the rest (key +0x1B0, team +0x1B8,
+// unit +0x1BC, EX +0x1C0, CPU behavior +0x1C4/+0x1C8/+0x1CC ...) comes from a CPU entry of the same team, key 4,
+// keys 4-9 (the 6th entry on: a whole copy), then that slot's unit, EX and behavior. Confirmed in game 2026-11-21
+// with 5 and 6 units (1v4, 1v5: match, result screen, rematch).
+// A vectored handler logs where the game breaks (exception RVA, stack), in case another 4-unit limit shows up.
+static const DWORD O_LIST = 0x510, LIST_COUNT = 0xb88, LIST_END = 0xce0, ENTRY0 = 8, ENTRY_SIZE = 0x2e0, ENTRY_KEEP = 0x158;
+static const DWORD RVA_LIST_LEA = 0x7a0774, RVA_LIST_BACK = 0x7a077b;
+static const BYTE SIG_LIST_LEA[7] = { 0x48, 0x8d, 0x81, 0x10, 0x05, 0x00, 0x00 };   // lea rax,[rcx+510h]
+alignas(16) static BYTE g_ext[ENTRY0 + T_MAXU * ENTRY_SIZE + 0x40];   // the list with up to 10 entries
+static volatile LONG64 g_ext_ptr;              // set only while game 0x7A0710 runs with the 5-entry copy
+static volatile LONG g_x5_on, g_x5_armed;
+static Config g_x5_cfg;   // the setup, copied for the game thread (under g_1v2_cs)
+static BYTE *g_list_page;
+static bool g_list_hooked;
+static PVOID g_x5_veh;
+
+static bool build_extras(BYTE *o) {
+    BYTE *list = o + O_LIST;
+    if (*(DWORD *)(list + LIST_COUNT) != 4) { ov_log("training: 5-10 units: the match has %lu units, not 4: no extra units", *(DWORD *)(list + LIST_COUNT)); return false; }
+    static Config c;
+    EnterCriticalSection(&g_1v2_cs); c = g_x5_cfg; LeaveCriticalSection(&g_1v2_cs);
+    if (c.nextra < 1 || c.nextra > T_MAXU - 4) return false;
+    int human = -1;
+    for (int i = 0; i < 4; i++) if (list[ENTRY0 + i * ENTRY_SIZE + 0x58]) human = i;
+    if (human < 0) return false;
+    DWORD pt = *(DWORD *)(list + ENTRY0 + human * ENTRY_SIZE + 0x1b8);
+    memcpy(g_ext, list, LIST_END);
+    for (int k = 0; k < c.nextra; k++) {
+        int idx = 4 + k, src = -1;
+        DWORD t = c.extra_team[k] ? 1 ^ pt : pt;
+        for (int i = 0; i < 4; i++)   // a CPU to copy, of the same team if there's one
+            if (i != human && (src < 0 || *(DWORD *)(list + ENTRY0 + i * ENTRY_SIZE + 0x1b8) == t)) src = i;
+        if (src < 0) { ov_log("training: 5-10 units: no CPU to copy"); return false; }
+        BYTE *e = g_ext + ENTRY0 + idx * ENTRY_SIZE, *s = list + ENTRY0 + src * ENTRY_SIZE;
+        // the 5th entry starts where the list's count and fields are (+0xB88..+0xCE0): those stay; the 6th on are whole
+        DWORD keep = idx == 4 ? ENTRY_KEEP : 0;
+        memcpy(e + keep, s + keep, ENTRY_SIZE - keep);
+        *(ULONG64 *)(e + 0x1b0) = (ULONG64)idx;
+        *(DWORD *)(e + 0x1b8) = t;
+        int u = pick_unit(c, idx);
+        if (u > 0) *(DWORD *)(e + 0x1bc) = (DWORD)u;   // else (empty random pool) the copied CPU's unit
+        *(DWORD *)(e + 0x1c0) = (DWORD)(c.ex[idx] == EX_RANDOM ? random_ex() : clampi(c.ex[idx], 0, 2));
+        const DWORD *b = CPU_BEHAVIOR[clampi(c.level[idx], 0, 9)];   // slot view +0x16C/+0x170/+0x174 = entry +0x1C4..
+        *(DWORD *)(e + 0x1c4) = b[1]; *(DWORD *)(e + 0x1c8) = b[2]; *(DWORD *)(e + 0x1cc) = b[0];
+        ov_log("training: 5-10 units: unit %d = %lu on the %s team (EX %lu, CPU %d; copy of entry %d)", idx + 1, *(DWORD *)(e + 0x1bc),
+               t == pt ? "your" : "enemy", *(DWORD *)(e + 0x1c0), c.level[idx], src);
+    }
+    *(DWORD *)(g_ext + LIST_COUNT) = 4 + (DWORD)c.nextra;   // last: on the 5th entry's first bytes (its name)
+    return true;
+}
+
+static LONG CALLBACK x5_veh(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    bool any = g_x5_any && code != 0x406D1388 && (code & 0xFFFFFFF0) != 0x40010000;   // not thread names / debug prints
+    if (!g_x5_armed || (!any && code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+                        code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED && code != 0xC0000409))
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedIncrement(&g_x5_logs) > 12) return EXCEPTION_CONTINUE_SEARCH;
+    ULONG_PTR base = (ULONG_PTR)GetModuleHandleW(NULL), end = base + 0x1395000;
+    ULONG_PTR ip = (ULONG_PTR)ep->ExceptionRecord->ExceptionAddress;
+    ULONG_PTR br = (ULONG_PTR)GetModuleHandleW(L"training_bridge.dll");
+    CONTEXT *c = ep->ContextRecord;
+    char trace[700]; int n = 0;
+    ULONG_PTR *sp = (ULONG_PTR *)c->Rsp;
+    for (int i = 0; i < 0x180 && n < (int)sizeof(trace) - 16; i++) {   // exe return addresses on the stack
+        ULONG_PTR v = 0; SIZE_T got = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), sp + i, &v, 8, &got) || got != 8) break;
+        if (v > base + 0x1000 && v < end) n += snprintf(trace + n, sizeof(trace) - n, " %llX", (ULONG64)(v - base));
+        else if (br && v > br + 0x1000 && v < br + 0x2c000) n += snprintf(trace + n, sizeof(trace) - n, " br:%llX", (ULONG64)(v - br));
+    }
+    trace[n] = 0;
+    if (br && ip > br && ip < br + 0x2c000) ov_log("training: 5-10 units: (the exception below is in the bridge at 0x%llX)", (ULONG64)(ip - br));
+    if (code == 0xE06D7363 && ep->ExceptionRecord->NumberParameters >= 3) {   // C++ throw: its message and the real frames
+        const char *what = "?";
+        BYTE *thrown = (BYTE *)ep->ExceptionRecord->ExceptionInformation[1];
+        const char *w = NULL; SIZE_T got = 0; char msg[96] = "?";
+        if (thrown && ReadProcessMemory(GetCurrentProcess(), thrown + 8, &w, 8, &got) && got == 8 && w &&
+            ReadProcessMemory(GetCurrentProcess(), w, msg, sizeof(msg) - 1, &got)) { msg[sizeof(msg) - 1] = 0; what = msg; }
+        CONTEXT u = *c;
+        char fr[500]; int k = 0;
+        for (int f = 0; f < 24 && u.Rip && k < (int)sizeof(fr) - 24; f++) {
+            ULONG_PTR r = u.Rip;
+            if (r >= base && r < end) k += snprintf(fr + k, sizeof(fr) - k, " %llX", (ULONG64)(r - base));
+            else if (br && r >= br && r < br + 0x2c000) k += snprintf(fr + k, sizeof(fr) - k, " br:%llX", (ULONG64)(r - br));
+            else k += snprintf(fr + k, sizeof(fr) - k, " ?");
+            DWORD64 ib = 0;
+            PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(u.Rip, &ib, NULL);
+            if (!fn) { u.Rip = *(DWORD64 *)u.Rsp; u.Rsp += 8; continue; }
+            PVOID hd; DWORD64 ef;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, ib, u.Rip, fn, &u, &hd, &ef, NULL);
+        }
+        fr[k] = 0;
+        ov_log("training: 5-10 units: C++ exception \"%s\", frames:%s", what, fr);
+    }
+    ULONG_PTR addr = code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters > 1 ? ep->ExceptionRecord->ExceptionInformation[1] : 0;
+    ov_log("training: 5-10 units: exception %08lX at %s0x%llX (address %p) rax %llX rcx %llX rdx %llX rbx %llX r8 %llX; stack:%s", code,
+           ip >= base && ip < end ? "RVA " : "", (ULONG64)(ip >= base && ip < end ? ip - base : ip), (void *)addr,
+           c->Rax, c->Rcx, c->Rdx, c->Rbx, c->R8, trace);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// A stack buffer overrun ends the game with a fast fail (int 29h at game RVA 0x551F21, 0xC0000409 code 2, seen
+// 2026-11-21 in the 1v4 test): no exception handler sees it. A detour on the game's __report_gsfailure (RVA
+// 0x551F04, mov [rsp+8],rcx; sub rsp,38h) logs its return address (the function whose stack array overflowed)
+// and the exe addresses on the stack before it ends the game.
+static const DWORD RVA_GS_FAIL = 0x551f04;
+static const BYTE GS_FAIL_PROLOGUE[9] = { 0x48, 0x89, 0x4c, 0x24, 0x08, 0x48, 0x83, 0xec, 0x38 };
+typedef void (*GsFailFn)(ULONG_PTR);
+static GsFailFn g_gs_tramp;
+static BYTE *g_gs_page;
+static bool g_gs_hooked;
+
+extern "C" __attribute__((noinline)) void tr_gs_detour(ULONG_PTR cookie) {
+    ULONG_PTR base = (ULONG_PTR)GetModuleHandleW(NULL), end = base + 0x1395000;
+    ULONG_PTR ret = (ULONG_PTR)__builtin_return_address(0);
+    char trace[600]; int n = 0;
+    ULONG_PTR *sp = (ULONG_PTR *)__builtin_frame_address(0);
+    for (int i = 0; i < 0x300 && n < (int)sizeof(trace) - 16; i++) {
+        ULONG_PTR v = 0; SIZE_T got = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), sp + i, &v, 8, &got) || got != 8) break;
+        if (v > base + 0x1000 && v < end) n += snprintf(trace + n, sizeof(trace) - n, " %llX", (ULONG64)(v - base));
+    }
+    trace[n] = 0;
+    ov_log("training: 5-10 units: STACK OVERRUN in the function returning to %s0x%llX (cookie %llX); stack:%s", ret >= base && ret < end ? "RVA " : "",
+           (ULONG64)(ret >= base && ret < end ? ret - base : ret), (ULONG64)cookie, trace);
+    g_gs_tramp(cookie);
+}
+
+static void gs_hook(BYTE *base) {
+    if (g_gs_hooked) return;
+    BYTE *fn = base + RVA_GS_FAIL;
+    if (memcmp(fn, GS_FAIL_PROLOGUE, sizeof(GS_FAIL_PROLOGUE))) { ov_log("training: 5-10 units: the game's stack check isn't the expected code"); return; }
+    BYTE *pg = alloc_near_exe(base);
+    if (!pg) return;
+    write_abs_jmp(pg, (const void *)tr_gs_detour);
+    memcpy(pg + 16, fn, 5);                  // mov [rsp+8],rcx (position-independent)
+    write_abs_jmp(pg + 21, fn + 5);
+    FlushInstructionCache(GetCurrentProcess(), pg, 4096);
+    g_gs_tramp = (GsFailFn)(pg + 16);
+    g_gs_page = pg;
+    BYTE patch[5] = { 0xE9 };
+    int32_t rel = (int32_t)(pg - (fn + 5));
+    memcpy(patch + 1, &rel, 4);
+    write_mem(fn, patch, 5);
+    g_gs_hooked = true;
+}
+
+// Game code with room for only 4 entries, capped at 4 while the experiment is on (found one by one from the
+// crash log). 0x859E10 (the battle log upload, CAcHttpRequestSaveBattleLog): 4 rows of 0x24 bytes on its stack,
+// the 5th overwrote the count and the stack cookie -> mov eax,[r9+0B88h] (both reads) becomes mov eax,4.
+struct CapPatch { DWORD rva; BYTE sig[7]; BYTE to[7]; const char *what; };
+static const CapPatch CAP_PATCHES[] = {
+    { 0x859ec2, { 0x41, 0x8b, 0x81, 0x88, 0x0b, 0x00, 0x00 }, { 0xb8, 0x04, 0x00, 0x00, 0x00, 0x90, 0x90 }, "battle log rows" },
+    { 0x859f23, { 0x41, 0x8b, 0x81, 0x88, 0x0b, 0x00, 0x00 }, { 0xb8, 0x04, 0x00, 0x00, 0x00, 0x90, 0x90 }, "battle log rows" },
+    // The game's result builder (0x883250) walks every match player (5) and looks each up in the bridge's
+    // 4-row unordered_map (built on the bridge's stack); a key not there was inserted, and that map can't grow
+    // ("invalid hash bucket count" -> bridge ScoreErrors 9, no result screen). A missing key now skips to the
+    // loop's next player (jne found / jmp 0x883A9B instead of the insert at 0x8839CA).
+    { 0x8839c8, { 0x75, 0x42, 0x0f, 0x10, 0x44, 0x24, 0x70 }, { 0x75, 0x42, 0xe9, 0xcc, 0x00, 0x00, 0x00 }, "result builder players" },
+};
+static void cap_patches(BYTE *base, bool on) {
+    for (const CapPatch &c : CAP_PATCHES) {
+        if (on) patch_code(base + c.rva, c.sig, 7, 0, c.to, 7, c.what);
+        else if (!memcmp(base + c.rva, c.to, 7)) write_mem(base + c.rva, c.sig, 7);
+    }
+}
+
+static bool list_hook(BYTE *base) {
+    if (g_list_hooked) return true;
+    BYTE *at = base + RVA_LIST_LEA;
+    if (memcmp(at, SIG_LIST_LEA, sizeof(SIG_LIST_LEA))) { ov_log("training: 5-10 units: the match's list code isn't the expected one"); return false; }
+    if (!g_list_page) {
+        BYTE *pg = alloc_near_exe(base);
+        if (!pg) return false;
+        BYTE *p = pg;
+        memcpy(p, SIG_LIST_LEA, 7); p += 7;                           // lea rax,[rcx+510h]
+        *p++ = 0x49; *p++ = 0xbb;                                     // mov r11,&g_ext_ptr
+        void *gp = (void *)&g_ext_ptr; memcpy(p, &gp, 8); p += 8;
+        static const BYTE pick[] = { 0x4d, 0x8b, 0x1b,                // mov r11,[r11]
+                                     0x4d, 0x85, 0xdb,                // test r11,r11
+                                     0x74, 0x03,                      // je +3
+                                     0x4c, 0x89, 0xd8 };              // mov rax,r11
+        memcpy(p, pick, sizeof(pick)); p += sizeof(pick);
+        write_abs_jmp(p, base + RVA_LIST_BACK);
+        FlushInstructionCache(GetCurrentProcess(), pg, 4096);
+        g_list_page = pg;
+    }
+    BYTE patch[7] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90 };
+    int32_t rel = (int32_t)(g_list_page - (at + 5));
+    memcpy(patch + 1, &rel, 4);
+    write_mem(at, patch, sizeof(patch));
+    if (!g_x5_veh) g_x5_veh = AddVectoredExceptionHandler(1, x5_veh);
+    gs_hook(base);
+    cap_patches(base, true);
+    g_list_hooked = true;
+    ov_log("training: 5-10 units: the next match gets the extra units");
+    return true;
+}
+
+static void list_unhook(BYTE *base) {
+    if (!g_list_hooked) return;
+    write_mem(base + RVA_LIST_LEA, SIG_LIST_LEA, sizeof(SIG_LIST_LEA));
+    cap_patches(base, false);
+    g_list_hooked = false;
+    ov_log("training: 5-10 units off");
+}
+
 extern "C" void *tr_restart_detour(void *obj, void *a, void *b, void *c) {
+    bool ext = false;
     if (g_flip_partner && obj) {
         BYTE *o = (BYTE *)obj;
         DWORD n = *(DWORD *)(o + O_UNIT_COUNT);
         ov_log("training: rematch: %lu units, teams %lu %lu %lu %lu", n, *(DWORD *)(o + SLOT0 + 0x160), *(DWORD *)(o + SLOT0 + SLOT_SIZE + 0x160),
                *(DWORD *)(o + SLOT0 + 2 * SLOT_SIZE + 0x160), *(DWORD *)(o + SLOT0 + 3 * SLOT_SIZE + 0x160));
         apply_layout(o);
+        if (g_x5_on && g_list_hooked && build_extras(o)) {
+            ext = true;
+            InterlockedExchange(&g_x5_armed, 1);
+            InterlockedExchange64(&g_ext_ptr, (LONG64)g_ext);
+        }
     }
-    return g_restart_tramp(obj, a, b, c);
+    void *r = g_restart_tramp(obj, a, b, c);
+    if (ext) { InterlockedExchange64(&g_ext_ptr, 0); ov_log("training: 5-10 units: match scene made with %lu entries", *(DWORD *)(g_ext + LIST_COUNT)); }
+    return r;
 }
 
 static bool restart_hook(BYTE *base) {
@@ -1108,8 +1388,13 @@ static DWORD WINAPI training_thread(LPVOID) {
         if (bridge_1v3 && !chain_hook((BYTE *)GetModuleHandleW(NULL))) { failed = true; continue; }
         if (bridge_1v3) finish_hook();   // diagnostics only: nothing depends on it
         team_check(bridge_1v3);                // the result screen with teams other than 2 and 2 (1v3, 3v1)
-        rematch_check(bridge_1v3 && outs > 0);  // fewer than 4 units: the rematch even when the result screen fails
-        rows_hook(bridge_1v3 && outs > 0);      // fewer than 4 units: made-up rows for the result screen
+        bool x5_on = bridge_1v3 && outs == 0 && c.nextra > 0;   // 5-10 units: the launcher's CPU slots past 4 units
+        EnterCriticalSection(&g_1v2_cs); g_x5_cfg = c; LeaveCriticalSection(&g_1v2_cs);
+        InterlockedExchange(&g_x5_rows, x5_on ? 1 : 0);
+        InterlockedExchange(&g_x5_on, x5_on ? 1 : 0);
+        if (x5_on) list_hook((BYTE *)GetModuleHandleW(NULL)); else list_unhook((BYTE *)GetModuleHandleW(NULL));
+        rematch_check(bridge_1v3 && (outs > 0 || x5_on));   // fewer than 4 units / 5-10 units: the rematch even when the result screen fails
+        rows_hook(bridge_1v3 && (outs > 0 || x5_on));   // fewer than 4 units: made-up rows; 5-10 units: the first 4 rows
         if (bridge_1v3) restart_hook((BYTE *)GetModuleHandleW(NULL));   // the rematch keeps the 1v3 / 1v2
         if (bridge_1v3) {   // the layout first, then the flag the game thread checks
             bool same = g_flip_partner != 0;
