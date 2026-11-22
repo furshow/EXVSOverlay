@@ -3,6 +3,13 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.2.4] - 2026-11-22
+### Replays
+- Loads **M1kou**'s replay patch ("EXVS multi-function patch" 20261028) from `Replay\EXVSReplay.dll` when the EXVS
+  Launcher put it there (Replays on every machine): every machine keeps the match replay, not only the elected one.
+  The DLL is checked by SHA-256 before it loads; splitscreen copies 2-4 don't load it (they share the game folder).
+  Its own input blocking stays off (the overlay does that). Thanks to M1kou.
+
 ## [1.2.3] - 2026-11-22
 ### Custom Training
 - **Custom team cost**: the total team cost of each team (`TeamCost1` your team, `TeamCost2` the enemy team in
