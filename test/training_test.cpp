@@ -239,6 +239,33 @@ int main(int argc, char **argv) {
                 printf("  5-slot case %s: partner %d a %d e %d extras %d unit5 %d unit6 %d\n", k.keys, lc.partner, lc.allies, lc.enemies, lc.nextra, lc.unit[4], lc.unit[5]);
             for (int p = 1; p < 4; p++) if (lc.unit[p] != k.units[p] || lc.layout[p] != k.lay[p]) printf("  5-slot case %s: position %d unit %d layout %d\n", k.keys, p, lc.unit[p], lc.layout[p]);
         }
+        // 7-10 units (slots 7-10): 5v5, 1v9, 9v1; unit of slot n = n, the extras in slot order after the bridge's 3
+        struct T { const char *teams; int a, e; int units[4]; int nx; int xu[6]; int xt[6]; } ten[] = {
+            { "0000011111", 4, 5, { 0, 2, 3, 6 }, 6, { 4, 5, 7, 8, 9, 10 }, { 0, 0, 1, 1, 1, 1 } },   // 5v5: 2-5 yours, 6-10 enemy
+            { "0111111111", 0, 9, { 0, 4, 2, 3 }, 6, { 5, 6, 7, 8, 9, 10 }, { 1, 1, 1, 1, 1, 1 } },   // 1v9
+            { "0000000001", 8, 1, { 0, 2, 3, 10 }, 6, { 4, 5, 6, 7, 8, 9 }, { 0, 0, 0, 0, 0, 0 } },   // 9v1
+        };
+        for (auto &k : ten) {
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nUnit1=0\n");
+            for (int i = 2; i <= 10; i++) fprintf(lf, "Unit%d=%d\nTeam%d=%c\nOn%d=1\n", i, i, i, k.teams[i - 1], i);
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            CHECK(lc.partner == 3 && lc.allies == k.a && lc.enemies == k.e && lc.nextra == k.nx);
+            for (int p = 1; p < 4; p++) { CHECK(lc.unit[p] == k.units[p]); }
+            for (int x = 0; x < k.nx; x++) { CHECK(lc.unit[4 + x] == k.xu[x] && lc.extra_team[x] == k.xt[x]); }
+            if (lc.allies != k.a || lc.enemies != k.e || lc.nextra != k.nx)
+                printf("  10-slot case %s: a %d e %d extras %d\n", k.teams, lc.allies, lc.enemies, lc.nextra);
+            for (int p = 1; p < 4 + lc.nextra; p++) if (p >= 4 ? lc.unit[p] != k.xu[p - 4] : lc.unit[p] != k.units[p]) printf("  10-slot case %s: position %d unit %d\n", k.teams, p, lc.unit[p]);
+        }
+        {   // 4v3: slots 2-4 yours, 5-7 enemy, 8-10 out
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nUnit1=0\n");
+            for (int i = 2; i <= 10; i++) fprintf(lf, "Unit%d=%d\nTeam%d=%d\nOn%d=%d\n", i, i, i, i >= 5, i, i <= 7);
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            CHECK(lc.allies == 3 && lc.enemies == 3 && lc.nextra == 3 && lc.unit[4] == 4 && lc.extra_team[0] == 0 && lc.unit[5] == 6 && lc.extra_team[1] == 1);
+        }
     }
 
     // --- the builder hook, on the real game exe mapped as an image (not run): argv[3]
@@ -357,6 +384,19 @@ int main(int argc, char **argv) {
         CHECK(*(ULONG64 *)(e6 + 0x1b0) == 5 && *(DWORD *)(e6 + 0x1b8) == 1 && *(DWORD *)(e6 + 0x1bc) == 666 && *(DWORD *)(e6 + 0x1c0) == 1);
         CHECK(*(DWORD *)e6 == 0x555043 && e6[0x58] == 0);   // a whole copy of an enemy CPU entry ("CPU", not human)
         CHECK(*(DWORD *)(e6 + 0x1c4) == CPU_BEHAVIOR[2][1] && *(DWORD *)(e6 + 0x1cc) == CPU_BEHAVIOR[2][0]);
+        // 10 units: 6 extras, keys 4-9, count 10, each a whole copy past the 5th
+        for (int x = 2; x < 6; x++) { g_x5_cfg.extra_team[x] = x & 1; g_x5_cfg.unit[4 + x] = 700 + x; g_x5_cfg.level[4 + x] = 3; g_x5_cfg.ex[4 + x] = 0; }
+        g_x5_cfg.nextra = 6;
+        CHECK(build_extras(obj));
+        CHECK(*(DWORD *)(g_ext + LIST_COUNT) == 10 && *(DWORD *)(g_ext + 0xcd4) == 0x1234);
+        for (int x = 1; x < 6; x++) {
+            BYTE *ex = g_ext + ENTRY0 + (4 + x) * ENTRY_SIZE;
+            CHECK(*(ULONG64 *)(ex + 0x1b0) == (ULONG64)(4 + x) && *(DWORD *)ex == 0x555043 && ex[0x58] == 0);
+            CHECK(*(DWORD *)(ex + 0x1bc) == (x == 1 ? 666u : 700u + x));
+        }
+        CHECK(*(DWORD *)(g_ext + ENTRY0 + 9 * ENTRY_SIZE + 0x1b8) == 1 && *(DWORD *)(g_ext + ENTRY0 + 8 * ENTRY_SIZE + 0x1b8) == 0);
+        g_x5_cfg.nextra = 7;
+        CHECK(!build_extras(obj));                            // 10 units at most
         g_x5_cfg.nextra = 1;
         g_x5_cfg.extra_team[0] = 0; g_x5_cfg.unit[4] = -1; g_x5_cfg.npool = 0;   // on your team; random with no pool: the copy's unit
         teams[1] = 0; *(DWORD *)(list + ENTRY0 + ENTRY_SIZE + 0x1b8) = 0;   // 2v2 with the 5th on your team (3v2)
