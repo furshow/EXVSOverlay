@@ -3,6 +3,13 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.2.3] - 2026-11-22
+### Custom Training
+- **Custom team cost**: the total team cost of each team (`TeamCost1` your team, `TeamCost2` the enemy team in
+  `Training\training.ini`, 500-99000; 0 = the game's 6000). With team cost on, while a match runs the overlay turns
+  the game's total (`*(exe+0x257A530)+0x44884`: remaining / total per team) into the picked one, also after a
+  rematch; cost already lost stays lost. The changes are logged. Tried in game.
+
 ## [1.2.2] - 2026-11-22
 ### Custom Training
 - **5 to 10 units**: 1v4 ... 4v1, 1v5, 3v3, and up to 1v9, 5v5 and 9v1, from the launcher's CPU slots 5 to 10

@@ -38,6 +38,7 @@ static const int T_MAXU = 10;   // units in a match at most (the bridge's 4 + 6 
 
 struct Config {
     bool enabled, random_stage, consume_cost;
+    int team_cost[2];   // total team cost of your team / the enemy team, 0 = the game's (team cost on only)
     // 1 = 2v2 (bridge), 0 = 1v2 and 2 = 1v3 (without team cost: the game's own training, see "solo" below),
     // 3 = any other layout (1v1, 2v1, 3v1: the bridge's 2v2 rearranged, see "layouts" below)
     int partner;
@@ -369,6 +370,11 @@ static bool read_config(const char *ini, Config *c) {
     c->seq = GetPrivateProfileIntA("Training", "Seq", 0, ini);
     c->random_stage = GetPrivateProfileIntA("Training", "RandomStage", 0, ini) != 0;
     c->consume_cost = GetPrivateProfileIntA("Training", "ConsumeCost", 1, ini) != 0;
+    for (int t = 0; t < 2; t++) {   // TeamCost1 = your team, TeamCost2 = the enemy team (launcher 1.3.3+)
+        char tk[16]; snprintf(tk, sizeof(tk), "TeamCost%d", t + 1);
+        int v = GetPrivateProfileIntA("Training", tk, 0, ini);
+        c->team_cost[t] = v <= 0 ? 0 : clampi(v, 500, 99000);
+    }
     char k[16], v[32];
     for (int i = 0; i < T_MAXU; i++) {   // slots 5-10 (index 4-9): the extra units (launcher 1.3.2+)
         snprintf(k, sizeof(k), "Unit%d", i + 1); GetPrivateProfileStringA("Training", k, "-1", v, sizeof(v), ini); c->unit[i] = atoi(v);
@@ -1306,6 +1312,36 @@ static bool chain_hook(BYTE *base) {
     return true;
 }
 
+// ---- custom team cost -------------------------------------------------------------------------------------
+// The game keeps each team's cost in a singleton: p = *(exe + 0x257A530), p + 0x44884 + 8 * team = { remaining,
+// total } (team 0 = yours in Custom Training: the bridge and the overlay put you there). The bridge only reads it
+// (its rules block). While a match runs with team cost on, a total that isn't the one picked (the game's 6000 at
+// match start, or again after a rematch) becomes the picked one, and the remaining cost moves by the same amount
+// (cost already lost stays lost).
+static const DWORD RVA_COST_SINGLETON = 0x257a530, O_TEAM_COST = 0x44884;
+static void watch_cost(const Config &c) {
+    static LONG fixes, last_active;
+    if (!g_rules_active) { last_active = 0; return; }
+    if (!last_active) { last_active = 1; fixes = 0; }
+    if (!c.consume_cost || (!c.team_cost[0] && !c.team_cost[1])) return;
+    BYTE *p = *(BYTE *volatile *)((BYTE *)GetModuleHandleW(NULL) + RVA_COST_SINGLETON);
+    if (!p) return;
+    for (int t = 0; t < 2; t++) {
+        LONG want = c.team_cost[t];
+        if (!want) continue;
+        volatile LONG *cur = (volatile LONG *)(p + O_TEAM_COST + 8 * t), *tot = cur + 1;
+        LONG T = *tot, C = *cur;
+        if (T <= 0 || T == want || C == -1) continue;
+        LONG nc = C == T ? want : C + (want - T);   // full at the start; else keep what was lost
+        if (nc < 1 && C > 0) nc = 1;
+        *tot = want; *cur = nc;
+        if (++fixes <= 8)
+            ov_log("training: team cost: %s team %ld/%ld -> %ld/%ld", t ? "enemy" : "your", C, T, nc, want);
+        else if (fixes == 9)
+            ov_log("training: team cost: the game keeps setting the total back; no more log lines this match");
+    }
+}
+
 static DWORD WINAPI training_thread(LPVOID) {
     char ini[MAX_PATH]; snprintf(ini, sizeof(ini), "%straining.ini", g_tdir);
     FILETIME last = {};
@@ -1319,6 +1355,7 @@ static DWORD WINAPI training_thread(LPVOID) {
         if (g_loaded) watch_rules();
         if (InterlockedExchange(&g_flip_slots, 0) && g_flip_partner) log_owner_after_match();
         watch_1v2();
+        if (have && c.enabled) watch_cost(c);
         if (tick % 5) continue;
         WIN32_FILE_ATTRIBUTE_DATA fa;
         if (GetFileAttributesExA(ini, GetFileExInfoStandard, &fa) && CompareFileTime(&fa.ftLastWriteTime, &last)) {
