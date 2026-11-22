@@ -112,6 +112,8 @@ static bool sha256_file(const wchar_t *path, char out[65]) {
     return ok;
 }
 
+bool ov_sha256_file(const wchar_t *path, char out[65]) { return sha256_file(path, out); }   // replay.cpp
+
 // Bridge state: seqlock at O_READ_SEQ (odd = the game is writing)
 static bool read_state(DWORD *ready, DWORD *err, DWORD *applied, DWORD *mode, DWORD *mode_applied) {
     for (int i = 0; i < 20; i++) {

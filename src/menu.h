@@ -63,6 +63,9 @@ WORD training_start_pad_mask(void);       // XInput Start + [controller] ArcadeS
 bool training_start_hid_button(USHORT b); // HID button number listed in [controller] / [controller-1] Start
 void training_note_start_blocked(const char *from);
 
+// replay.cpp (M1kou's replay patch: every machine keeps the match replay; loads Replay\EXVSReplay.dll)
+void replay_init(void);
+
 // menu.cpp
 int menu_key_vk(const char *name);  // loader key name -> virtual key (0 = unknown)
 bool menu_keyboard_blocked(void);   // keyboard / mouse: menu open, not focused (option), or not this split player's
