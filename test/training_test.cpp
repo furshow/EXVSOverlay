@@ -265,6 +265,19 @@ int main(int argc, char **argv) {
             fclose(lf);
             Config lc; read_config(lini, &lc);
             CHECK(lc.allies == 3 && lc.enemies == 3 && lc.nextra == 3 && lc.unit[4] == 4 && lc.extra_team[0] == 0 && lc.unit[5] == 6 && lc.extra_team[1] == 1);
+            CHECK(lc.team_cost[0] == 0 && lc.team_cost[1] == 0);   // no TeamCost keys: the game's
+        }
+        {   // custom team cost: TeamCost1 = yours, TeamCost2 = enemy; clamped, 0 / negative = the game's
+            FILE *lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nTeamCost1=9000\nTeamCost2=100\n");
+            fclose(lf);
+            Config lc; read_config(lini, &lc);
+            CHECK(lc.team_cost[0] == 9000 && lc.team_cost[1] == 500);
+            lf = fopen(lini, "w");
+            fprintf(lf, "[Training]\nTeamCost1=-5\nTeamCost2=500000\n");
+            fclose(lf);
+            read_config(lini, &lc);
+            CHECK(lc.team_cost[0] == 0 && lc.team_cost[1] == 99000);
         }
     }
 
