@@ -268,6 +268,16 @@ static bool load_bridge(void) {
 
     static const BYTE three = 3, gate_on[2] = { 0xb0, 0x01 };
     BYTE members_was = base[RVA_MEMBERS + 3], gate_was[2] = { base[RVA_GATE + 2], base[RVA_GATE + 3] };
+    // The bridge's setup check (bridge fn 0x9970) takes unit ids up to 99999999 plus its own list of 12 bosses
+    // (cmp ecx,5F5E0FFh / jbe at bridge 0x99C1): an NPC (7SS UUU VVV) or another 9-digit id made the whole setup
+    // fail (error 2), so you and the bridge's 3 CPUs kept the training's default units while the extra units
+    // (5-10, written by the overlay) got theirs (2026-11-23). The limit becomes 999999999 in memory.
+    auto bridge_id_limit = [] {
+        BYTE *br = (BYTE *)GetModuleHandleW(L"training_bridge.dll");
+        static const BYTE sig[7] = { 0x81, 0xf9, 0xff, 0xe0, 0xf5, 0x05, 0x76 }, to[4] = { 0xff, 0xc9, 0x9a, 0x3b };
+        if (br && patch_code(br + 0x99c1, sig, sizeof(sig), 2, to, sizeof(to), "bridge unit id limit"))
+            ov_log("training: the bridge takes NPC / 9-digit unit ids");
+    };
     // anything below fails: the game goes back to the normal 1v1 (no half-applied 2v2 with default units)
     auto undo = [&] {
         kind_flags_restore();
@@ -298,7 +308,11 @@ static bool load_bridge(void) {
         DWORD ready, err, a, md, ma;
         if (read_state(&ready, &err, &a, &md, &ma)) {
             if (err) { set_status("error", "Bridge: %s", bridge_error(err)); return undo(); }
-            if (ready == 1) { kind_flags_restore(); clone_site_restore(base, true); g_loaded = true; ov_log("training: bridge loaded, hooks ready"); return true; }
+            if (ready == 1) {
+                kind_flags_restore(); clone_site_restore(base, true); g_loaded = true; ov_log("training: bridge loaded, hooks ready");
+                bridge_id_limit();
+                return true;
+            }
         }
         Sleep(100);
     }
