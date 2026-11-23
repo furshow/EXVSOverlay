@@ -182,6 +182,70 @@ static void kind_flags_restore(void) {
     g_kind_n = 0;
 }
 
+// Mod Manager clone units: the exe looks a unit id up in a flag table in 4 functions, and the Mod Manager turns
+// each of their first instructions into "jmp stub" (stub in the free end of .text: clone id -> original id, the
+// moved instructions, jmp back). One of them, RVA 0x45F430, is a function the bridge checks byte for byte
+// (bridge error 10) and then hooks with MinHook. So, only while the bridge starts: the original 9 bytes go back,
+// the bridge checks and hooks them; then the stub's tail (the moved instructions + jmp back) becomes a jmp to
+// the bridge's hook, and the function start gets the clone jmp again: game -> clone stub (id mapped) -> bridge
+// hook -> MinHook trampoline (the original instructions) -> the rest of the function.
+static const DWORD RVA_CLONE_SITE = 0x45f430;
+static const BYTE CLONE_SITE_ORIG[9] = { 0x33, 0xc9, 0x4c, 0x8d, 0x0d, 0x27, 0x5d, 0xf5, 0x00 };   // xor ecx,ecx; lea r9,[rip+..]
+static BYTE g_clone_jmp[9];       // the Mod Manager's bytes (jmp stub + nops), taken off while the bridge starts
+static BYTE *g_clone_tail;        // in the stub: the moved instructions + jmp back
+static bool g_clone_off;
+
+static BYTE *rel32_target(BYTE *at) { return at + 5 + *(int32_t *)(at + 1); }
+// 8 bytes at an 8-aligned address in one store (a game thread never runs half old, half new code), then byte 8
+static void write_site9(BYTE *at, const BYTE *src, bool byte8_first) {
+    DWORD old;
+    if (!VirtualProtect(at, 9, PAGE_EXECUTE_READWRITE, &old)) return;
+    if (byte8_first) at[8] = src[8];
+    LONG64 v; memcpy(&v, src, 8);
+    InterlockedExchange64((volatile LONG64 *)at, v);
+    if (!byte8_first) at[8] = src[8];
+    VirtualProtect(at, 9, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, 9);
+}
+static void clone_site_for_bridge(BYTE *base) {
+    BYTE *p = base + RVA_CLONE_SITE;
+    g_clone_off = false; g_clone_tail = NULL;
+    if (!memcmp(p, CLONE_SITE_ORIG, 9)) return;                                   // no clones
+    if (p[0] != 0xe9 || memcmp(p + 5, "\x90\x90\x90\x90", 4)) { ov_log("training: unknown code at the clone site (RVA 0x%lX)", RVA_CLONE_SITE); return; }
+    BYTE *stub = rel32_target(p);
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(stub, &mi, sizeof(mi)) || mi.AllocationBase != (void *)base) return;
+    // stub: push r11 ... pop r11 (41 5B), then the moved "xor ecx,ecx; lea r9,[rip+x]" (33 C9 4C 8D 0D), jmp back
+    for (int i = 0; i < 64; i++)
+        if (stub[i] == 0x41 && stub[i + 1] == 0x5b && !memcmp(stub + i + 2, CLONE_SITE_ORIG, 5) && stub[i + 11] == 0xe9 &&
+            rel32_target(stub + i + 11) == p + 9) { g_clone_tail = stub + i + 2; break; }
+    if (!g_clone_tail) { ov_log("training: the clone stub at RVA 0x%llX doesn't look as expected", (unsigned long long)(stub - base)); return; }
+    memcpy(g_clone_jmp, p, 9);
+    write_site9(p, CLONE_SITE_ORIG, true);
+    g_clone_off = true;
+    ov_log("training: Mod Manager clone units: their unit id lookup at RVA 0x%lX handed to the bridge's check", RVA_CLONE_SITE);
+}
+// hooked = the bridge is ready (its hook is at the site); otherwise the clone bytes simply go back
+static void clone_site_restore(BYTE *base, bool hooked) {
+    if (!g_clone_off) return;
+    g_clone_off = false;
+    BYTE *p = base + RVA_CLONE_SITE;
+    if (hooked && p[0] == 0xe9 && memcmp(p, CLONE_SITE_ORIG, 5)) {
+        BYTE *hook = rel32_target(p);
+        int64_t d = hook - (g_clone_tail + 5);
+        if (d == (int32_t)d) {
+            BYTE j[5] = { 0xe9 }; int32_t r = (int32_t)d; memcpy(j + 1, &r, 4);
+            write_mem(g_clone_tail, j, 5);            // nothing runs the stub now (the site jumps to the bridge)
+            write_site9(p, g_clone_jmp, false);
+            ov_log("training: clone units: id lookup -> bridge hook chained");
+            return;
+        }
+        ov_log("training: clone units: the bridge's hook is out of jmp range; clones keep the bridge's lookup");
+        return;                                        // leave the bridge's hook (clone ids unmapped at this site)
+    }
+    if (!memcmp(p, CLONE_SITE_ORIG, 9)) write_site9(p, g_clone_jmp, false);
+}
+
 // training-entry.ini [Entry] Enabled: the bridge's own match intro (VS screen with the unit lineup, then the match
 // set up like an online one), read once when the bridge loads. Off for 1v3 with team cost (see the 1v3 section);
 // switching between 2v2 and 1v3 with team cost then needs a game restart.
@@ -207,6 +271,7 @@ static bool load_bridge(void) {
     // anything below fails: the game goes back to the normal 1v1 (no half-applied 2v2 with default units)
     auto undo = [&] {
         kind_flags_restore();
+        clone_site_restore(base, false);
         if (base[RVA_MEMBERS + 3] != members_was) write_mem(base + RVA_MEMBERS + 3, &members_was, 1);
         if (memcmp(base + RVA_GATE + 2, gate_was, 2)) write_mem(base + RVA_GATE + 2, gate_was, 2);
         return false;
@@ -227,12 +292,13 @@ static bool load_bridge(void) {
     if (rd(O_MAGIC) != B_MAGIC || rd(O_PROTOCOL) != B_PROTOCOL || rd(O_SIZE) != B_SIZE) { set_status("error", "Unexpected training block"); return undo(); }
 
     kind_flags_for_bridge(base);
+    clone_site_for_bridge(base);
     if (!LoadLibraryW(dll)) { set_status("error", "training_bridge.dll didn't load (%lu)", GetLastError()); return undo(); }
     for (int i = 0; i < 100; i++) {
         DWORD ready, err, a, md, ma;
         if (read_state(&ready, &err, &a, &md, &ma)) {
             if (err) { set_status("error", "Bridge: %s", bridge_error(err)); return undo(); }
-            if (ready == 1) { kind_flags_restore(); g_loaded = true; ov_log("training: bridge loaded, hooks ready"); return true; }
+            if (ready == 1) { kind_flags_restore(); clone_site_restore(base, true); g_loaded = true; ov_log("training: bridge loaded, hooks ready"); return true; }
         }
         Sleep(100);
     }
