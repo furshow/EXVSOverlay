@@ -3,6 +3,13 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.2.6] - 2026-11-23
+### Custom Training
+- **NPCs work in every slot.** With an NPC (the game's CPU units, 9-digit ids) for you or one of the first 3 CPUs,
+  the training bridge refused the whole setup: its check takes unit ids up to 99999999 plus its own 12 bosses. You and
+  the first 3 CPUs kept the training's default units (RX-78s) while CPUs 5-10 got theirs. Once the bridge is ready
+  the overlay raises that limit to 999999999 (in memory, bridge fn 0x9970).
+
 ## [1.2.5] - 2026-11-23
 ### Custom Training
 - Works with the Mod Manager's **clone units**. The clone patch changes a game function that the training bridge
