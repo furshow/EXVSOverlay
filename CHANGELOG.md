@@ -3,6 +3,13 @@
 All notable changes to EXVS Overlay. The release workflow (.github/workflows/build-release.yml) uses the
 section of the released version as the release notes.
 
+## [1.2.5] - 2026-11-23
+### Custom Training
+- Works with the Mod Manager's **clone units**. The clone patch changes a game function that the training bridge
+  checks byte for byte and then hooks (RVA 0x45F430, a unit id lookup), so the bridge refused to start (error 10).
+  While the bridge starts, the overlay puts the original bytes back; once its hook is in, the clone code runs first
+  (clone id -> original id) and then jumps to the bridge's hook. Clones keep working in every mode.
+
 ## [1.2.4] - 2026-11-22
 ### Replays
 - Loads **M1kou**'s replay patch ("EXVS multi-function patch" 20261028) from `Replay\EXVSReplay.dll` when the EXVS

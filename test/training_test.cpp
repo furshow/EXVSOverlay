@@ -536,6 +536,38 @@ int main(int argc, char **argv) {
         g_flip_partner = was; g_layout_out = wout;
     }
 
+    // --- Mod Manager clone units: an exe with the clone patch mapped as an image (not run): argv[4]
+    if (argc > 4) {
+        wchar_t exe[MAX_PATH]; swprintf(exe, MAX_PATH, L"%hs", argv[4]);
+        BYTE *base = (BYTE *)LoadLibraryExW(exe, NULL, DONT_RESOLVE_DLL_REFERENCES);
+        CHECK(base != NULL);
+        if (base) {
+            BYTE *p = base + RVA_CLONE_SITE, clone[9];
+            memcpy(clone, p, 9);
+            CHECK(p[0] == 0xe9);
+            // no bridge hook (it failed): the clone bytes come back
+            clone_site_for_bridge(base);
+            CHECK(g_clone_off && g_clone_tail && !memcmp(p, CLONE_SITE_ORIG, 9));
+            clone_site_restore(base, false);
+            CHECK(!g_clone_off && !memcmp(p, clone, 9));
+            // the bridge hooks the restored function (MinHook: jmp rel32 to its relay)
+            clone_site_for_bridge(base);
+            BYTE *relay = base + 0x1000, j[5] = { 0xe9 };
+            int32_t r = (int32_t)(relay - (p + 5)); memcpy(j + 1, &r, 4);
+            write_mem(p, j, 5);
+            clone_site_restore(base, true);
+            CHECK(!memcmp(p, clone, 9));                                   // game -> clone stub again
+            CHECK(g_clone_tail[0] == 0xe9 && rel32_target(g_clone_tail) == relay);   // stub -> bridge hook
+            FreeLibrary((HMODULE)base);
+        }
+        // the original exe: nothing to do
+        if (argc > 3) {
+            wchar_t o[MAX_PATH]; swprintf(o, MAX_PATH, L"%hs", argv[3]);
+            BYTE *b = (BYTE *)LoadLibraryExW(o, NULL, DONT_RESOLVE_DLL_REFERENCES);
+            if (b) { clone_site_for_bridge(b); CHECK(!g_clone_off && !memcmp(b + RVA_CLONE_SITE, CLONE_SITE_ORIG, 9)); FreeLibrary((HMODULE)b); }
+        }
+    }
+
     printf(fails ? "%d FAILED\n" : "all training tests passed\n", fails);
     return fails ? 1 : 0;
 }
